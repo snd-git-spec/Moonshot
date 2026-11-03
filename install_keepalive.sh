@@ -19,7 +19,8 @@ cat > "$AUTO_PLIST" <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>$ROOT/.venv/bin/python</string>
-    <string>$ROOT/moonshot.py</string>
+    <string>-m</string>
+    <string>moonshot</string>
     <string>autopilot</string>
     <string>--cooldown-seconds</string>
     <string>60</string>
@@ -66,8 +67,8 @@ EOF
 launchctl bootout "gui/$UID_NUM/com.cake.moonshot.autopilot" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cake.moonshot.dashboard" 2>/dev/null || true
 # Also clear any orphan processes
-pkill -f "moonshot.py autopilot" 2>/dev/null || true
-pkill -f "moonshot.py paper" 2>/dev/null || true
+pkill -f "-m moonshot autopilot" 2>/dev/null || true
+pkill -f "-m moonshot paper" 2>/dev/null || true
 pkill -f "streamlit run dashboard.py" 2>/dev/null || true
 sleep 1
 

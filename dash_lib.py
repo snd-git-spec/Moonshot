@@ -1641,7 +1641,7 @@ def paper_status_banner(
     else:
         st.warning(
             "**Practice bot does not look like it is running.** "
-            "In a terminal run: `python moonshot.py paper`"
+            "In a terminal run: `python -m moonshot paper`"
         )
 
     bits = []

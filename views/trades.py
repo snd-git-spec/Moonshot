@@ -26,7 +26,7 @@ page_header("", "Trades", "Closed trades · entries ▲/▼ · exits ✕")
 if not db_exists():
     empty_state(
         "No trades yet",
-        "Run <code>python moonshot.py paper</code> and wait for the bot to close some trades.",
+        "Run <code>python -m moonshot paper</code> and wait for the bot to close some trades.",
     )
     st.stop()
 

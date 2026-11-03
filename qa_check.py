@@ -26,17 +26,17 @@ def bad(msg: str) -> None:
 def main() -> int:
     print("Moonshot QA")
     # 1) processes
-    out = subprocess.check_output(["pgrep", "-fl", "moonshot.py|streamlit"], text=True, stderr=subprocess.DEVNULL) if False else ""
+    out = subprocess.check_output(["pgrep", "-fl", "-m moonshot|streamlit"], text=True, stderr=subprocess.DEVNULL) if False else ""
     try:
-        out = subprocess.check_output(["bash", "-lc", "pgrep -fl 'moonshot.py|streamlit' || true"], text=True)
+        out = subprocess.check_output(["bash", "-lc", "pgrep -fl '-m moonshot|streamlit' || true"], text=True)
     except Exception as e:
         bad(f"pgrep failed: {e}")
         out = ""
-    if "moonshot.py autopilot" in out:
+    if "-m moonshot autopilot" in out:
         ok("autopilot process running")
     else:
         bad("autopilot process NOT running")
-    if "moonshot.py paper" in out:
+    if "-m moonshot paper" in out:
         ok("paper process running")
     else:
         bad("paper process NOT running")

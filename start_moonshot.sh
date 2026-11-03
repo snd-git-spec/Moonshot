@@ -40,9 +40,9 @@ def spawn(cmd, log_name, pid_name):
     print(f"{pid_name}: {proc.pid} -> logs/{log_name}")
     return proc.pid
 
-kill_patterns("moonshot.py autopilot", "moonshot.py paper")
+kill_patterns("-m moonshot autopilot", "-m moonshot paper")
 spawn(
-    [str(venv_python), str(root / "moonshot.py"), "autopilot", "--cooldown-seconds", "60"],
+    [str(venv_python), "-m", "moonshot", "autopilot", "--cooldown-seconds", "60"],
     "autopilot.log",
     "autopilot.pid",
 )

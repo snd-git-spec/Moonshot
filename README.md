@@ -12,6 +12,15 @@ pip install -r requirements.txt
 
 Put your MEXC keys in `.env` if you have them. Keep `LIVE_TRADING_ENABLED=0`.
 
+## CLI
+
+```bash
+python -m moonshot selftest
+python -m moonshot backtest --synthetic
+python -m moonshot paper
+python -m moonshot autopilot
+```
+
 ## Everyday use
 
 **Start (survives Cursor + auto-restarts):**

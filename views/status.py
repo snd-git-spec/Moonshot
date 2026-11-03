@@ -31,7 +31,7 @@ if not db_exists():
     empty_state(
         "Nothing to show yet",
         "Start practice trading in a terminal:<br/>"
-        "<code>python moonshot.py paper</code><br/><br/>"
+        "<code>python -m moonshot paper</code><br/><br/>"
         "Then refresh this page.",
     )
     st.stop()

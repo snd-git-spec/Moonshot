@@ -722,7 +722,7 @@ def live_panel() -> None:
             empty_state(
                 "Nothing running yet",
                 "Start with <code>./install_keepalive.sh</code> or "
-                "<code>python moonshot.py autopilot</code>",
+                "<code>python -m moonshot autopilot</code>",
             )
             return
 
