@@ -1,0 +1,26 @@
+---
+description: Never claim fixed/applied without verifying Live state, env, and UI data path
+alwaysApply: true
+---
+
+# Verify before claiming fixed
+
+Never tell the user something is fixed, applied, improved, or "done" until it is checked in the place they actually look.
+
+## Required before "fixed" / "applied" / "working now"
+
+1. Read the live state the UI reads (not only the code you edited).
+2. Confirm `.env` / config matches the intended book when a promote/apply was claimed.
+3. Confirm the metric on Live (or the relevant screen) matches — e.g. week $ / % — with a real read, not an assumption.
+4. If a restart was required, re-read state after restart; do not trust pre-restart values.
+5. If history, elite, or pending state was touched, confirm it was not wiped or clobbered.
+
+## Do not
+
+- Announce a hunt find as deployed when only logs show it was found.
+- Soften or rewrite the user's goals (e.g. +100%/week) without explicit ask.
+- Call a code change complete without end-to-end verification of state + UI data path.
+
+## Standard of thoroughness
+
+Check everything that can disagree: code, autopilot state, env, logs, and the dashboard data path. Sloppy partial checks are failures.

@@ -1,0 +1,11 @@
+{
+  "deployed": false,
+  "reason": "no config cleared soft-run floor + n>=80 + positive OOS + win>=50%",
+  "strategy": "momentum_15",
+  "timeframe": "15m",
+  "baseline_score": 17,
+  "baseline_win": 0.167,
+  "baseline_ret": -0.215,
+  "baseline_soft_ret": -0.95,
+  "baseline_n": 30
+}

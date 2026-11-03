@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.moonshot_cache/
+.moonshot_autopilot.json
+.moonshot_live.jsonl
+.moonshot_paper_runtime.json
+logs/
+moonshot.db
+moonshot.db-*
+.env
+.streamlit/secrets.toml
+.DS_Store
