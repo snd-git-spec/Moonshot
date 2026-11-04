@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from itertools import product
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,9 @@ from moonshot.types import (
 from moonshot.position import (
     Position,
 )
+
+if TYPE_CHECKING:
+    from moonshot.risk import RiskEngine
 
 from moonshot.paths import ROOT, DB_PATH
 
