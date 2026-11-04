@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import math
 import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
 import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
@@ -45,28 +32,66 @@ from moonshot.data import (
 )
 
 from moonshot.paths import (
-    ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
-    PAPER_RUNTIME_PATH, RULES_PATH,
+    ENV_PATH,
+    AUTOPILOT_STATE,
+    LIVE_FEED,
 )
 
 _SAFE_ENV_KEYS = {
-    "ADX_ENTER", "ADX_EXIT", "VOLUME_MULTIPLIER", "BREAKOUT_BUFFER_ATR",
-    "BREAKOUT_LOOKBACK", "TRAIL_ATR", "TRAIL_ATR_LOSER", "USE_ASYMMETRIC_TRAIL",
-    "COOLDOWN_BARS", "REQUIRE_RISING_ADX",
-    "ENABLE_PYRAMIDING", "ENABLE_PARTIAL", "PARTIAL_AT_R", "PARTIAL_PCT",
-    "LEVERAGE", "MAX_ACCOUNT_LEVERAGE", "MAX_NET_LEVERAGE", "MAX_OPEN_POSITIONS",
-    "TIMEFRAME", "STRATEGY",
-    "MOM_LOOKBACK", "MOM_MIN_ATR",
-    "INITIAL_STOP_ATR", "FEE_TAKER", "SLIPPAGE_BPS",
-    "H4_EMA_FAST", "H4_EMA_SLOW", "H4_ADX_MIN_SHORT",
-    "EMA_ENTRY_PERIOD", "PULLBACK_LOOKBACK", "BTC_ADX_MIN", "BREADTH_MIN",
-    "RISK_PCT", "INITIAL_MARGIN_PCT", "AGGRESSIVE_MARGIN_PCT",
-    "MAX_DAILY_LOSS_PCT", "MAX_PEAK_DRAWDOWN_PCT",
-    "STREAK_LOSSES", "STREAK_PAUSE_HOURS", "EXPECTANCY_FLOOR",
-    "REQUIRE_RSI_VETO", "RSI_LONG_MAX", "RSI_SHORT_MIN", "RSI_PERIOD",
-    "REQUIRE_SQUEEZE", "SQUEEZE_LOOKBACK", "BB_PERIOD", "BB_STD",
-    "KC_PERIOD", "KC_ATR_MULT", "REQUIRE_BTC_REGIME",
-    "ENABLE_TIME_STOP", "TIME_STOP_BARS", "TIME_STOP_MIN_R",
+    "ADX_ENTER",
+    "ADX_EXIT",
+    "VOLUME_MULTIPLIER",
+    "BREAKOUT_BUFFER_ATR",
+    "BREAKOUT_LOOKBACK",
+    "TRAIL_ATR",
+    "TRAIL_ATR_LOSER",
+    "USE_ASYMMETRIC_TRAIL",
+    "COOLDOWN_BARS",
+    "REQUIRE_RISING_ADX",
+    "ENABLE_PYRAMIDING",
+    "ENABLE_PARTIAL",
+    "PARTIAL_AT_R",
+    "PARTIAL_PCT",
+    "LEVERAGE",
+    "MAX_ACCOUNT_LEVERAGE",
+    "MAX_NET_LEVERAGE",
+    "MAX_OPEN_POSITIONS",
+    "TIMEFRAME",
+    "STRATEGY",
+    "MOM_LOOKBACK",
+    "MOM_MIN_ATR",
+    "INITIAL_STOP_ATR",
+    "FEE_TAKER",
+    "SLIPPAGE_BPS",
+    "H4_EMA_FAST",
+    "H4_EMA_SLOW",
+    "H4_ADX_MIN_SHORT",
+    "EMA_ENTRY_PERIOD",
+    "PULLBACK_LOOKBACK",
+    "BTC_ADX_MIN",
+    "BREADTH_MIN",
+    "RISK_PCT",
+    "INITIAL_MARGIN_PCT",
+    "AGGRESSIVE_MARGIN_PCT",
+    "MAX_DAILY_LOSS_PCT",
+    "MAX_PEAK_DRAWDOWN_PCT",
+    "STREAK_LOSSES",
+    "STREAK_PAUSE_HOURS",
+    "EXPECTANCY_FLOOR",
+    "REQUIRE_RSI_VETO",
+    "RSI_LONG_MAX",
+    "RSI_SHORT_MIN",
+    "RSI_PERIOD",
+    "REQUIRE_SQUEEZE",
+    "SQUEEZE_LOOKBACK",
+    "BB_PERIOD",
+    "BB_STD",
+    "KC_PERIOD",
+    "KC_ATR_MULT",
+    "REQUIRE_BTC_REGIME",
+    "ENABLE_TIME_STOP",
+    "TIME_STOP_BARS",
+    "TIME_STOP_MIN_R",
 }
 
 # Autopilot hunt targets — PRIMARY bar is holdout-window return with leverage.
@@ -77,10 +102,10 @@ HUNT_TARGETS = {
     "train_n": 20,
     "test_n": 20,
     "max_dd": 0.55,
-    "win_rate": 0.60,     # PRIMARY quality bar — aim for consistent winners, not coin-flip
-    "test_return": 0.50,     # secondary: long OOS context (NOT the weekly claim)
+    "win_rate": 0.60,  # PRIMARY quality bar — aim for consistent winners, not coin-flip
+    "test_return": 0.50,  # secondary: long OOS context (NOT the weekly claim)
     "soft_return_floor": -0.30,
-    "week_return": 1.00,     # PRIMARY: +100% in holdout window on leveraged book
+    "week_return": 1.00,  # PRIMARY: +100% in holdout window on leveraged book
     # Consider/promote gate — denser than old 6/7d so noise books don't promote.
     "week_min_trades": 10,
     "week_target_trades": 40,
@@ -103,18 +128,18 @@ HUNT_TARGETS = {
 #
 # Calendar-normalized depth: same wall-clock for every TF; bars follow TF under
 # MAX_RANGE_BARS. Research prices default to Binance spot (deeper than MEXC).
-HUNT_SCOUT_DAYS = 90              # reserved scout-only slice
-HUNT_CONFIRM_DAYS = 180           # search / multi-coin confirm window
-HUNT_FINALIST_DAYS = 540          # promote recheck target (clamped by bar cap)
-HUNT_WF_DAYS = 180                # walk-forward history before fit start
-HUNT_SEARCH_SYMBOLS = 5           # multi-coin confirm book
-HUNT_SCOUT_TOP = 16               # BTC survivors that get multi-coin soft/week
-HUNT_EXPLORE_N = 48               # aggressive scout (cheap on 1 coin)
+HUNT_SCOUT_DAYS = 90  # reserved scout-only slice
+HUNT_CONFIRM_DAYS = 180  # search / multi-coin confirm window
+HUNT_FINALIST_DAYS = 540  # promote recheck target (clamped by bar cap)
+HUNT_WF_DAYS = 180  # walk-forward history before fit start
+HUNT_SEARCH_SYMBOLS = 5  # multi-coin confirm book
+HUNT_SCOUT_TOP = 16  # BTC survivors that get multi-coin soft/week
+HUNT_EXPLORE_N = 48  # aggressive scout (cheap on 1 coin)
 HUNT_BREAKOUT_N = 56
 HUNT_SOFT_BUDGET = {"polish": 10, "explore": 14, "breakout": 16}
 # After this many HOLD passes, loosen floor / widen confirm so overnight climb continues
 HUNT_STUCK_HELD = 6
-HUNT_CHAMPION_STALE_PP = 0.08     # stored peak − live reeval ≥ 8pp → floor uses live
+HUNT_CHAMPION_STALE_PP = 0.08  # stored peak − live reeval ≥ 8pp → floor uses live
 HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
 HUNT_TF_ALLOW = ("5m", "15m")
 HUNT_LEV_POLISH = (5, 7, 10)
@@ -185,7 +210,10 @@ def _hunt_fetch_raw(
     for s in symbols:
         try:
             raw[s] = fetch_historical_range(
-                s, tf, t0, t1,
+                s,
+                tf,
+                t0,
+                t1,
                 warmup_bars=warm,
                 refresh=bool(refresh),
                 source=src,
@@ -194,8 +222,14 @@ def _hunt_fetch_raw(
             log.warning("hunt fetch %s %s %s failed: %s", s, tf, tier, e)
     log.info(
         "hunt data · source=%s tier=%s tf=%s days≈%d · %s→%s · %d/%d symbols",
-        src, tier, tf, _hunt_calendar_days(tier, tf),
-        t0.date(), t1.date(), len(raw), len(symbols),
+        src,
+        tier,
+        tf,
+        _hunt_calendar_days(tier, tf),
+        t0.date(),
+        t1.date(),
+        len(raw),
+        len(symbols),
     )
     return raw
 
@@ -219,7 +253,10 @@ def _hunt_fetch_wf_raw(
     for s in symbols:
         try:
             raw[s] = fetch_historical_range(
-                s, tf, t0, hs,
+                s,
+                tf,
+                t0,
+                hs,
                 warmup_bars=warm,
                 refresh=bool(refresh),
                 source=src,
@@ -233,9 +270,14 @@ def _hunt_bars_for_tf(tf: str, *, full: bool = False) -> int:
     """Approx bar count for Health / legacy callers (calendar tier → estimate)."""
     tier = "finalist" if full else "confirm"
     t0, t1 = _hunt_window_bounds(tier, tf)
-    return int(estimate_range_bars(
-        tf, t0, t1, warmup_bars=range_warmup_bars(tf),
-    ))
+    return int(
+        estimate_range_bars(
+            tf,
+            t0,
+            t1,
+            warmup_bars=range_warmup_bars(tf),
+        )
+    )
 
 
 def _week_delta_needed(incumbent_ret: float, week_tgt: float = 1.0) -> float:
@@ -290,9 +332,7 @@ def _save_autopilot_state(state: dict) -> None:
     `.json.tmp` lets one process unlink the other's file mid-replace.
     """
     payload = json.dumps(state, indent=2, default=str)
-    tmp = AUTOPILOT_STATE.with_name(
-        f".moonshot_autopilot.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
-    )
+    tmp = AUTOPILOT_STATE.with_name(f".moonshot_autopilot.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(payload)
         os.replace(str(tmp), str(AUTOPILOT_STATE))
@@ -472,5 +512,3 @@ def _cfg_to_env_updates(cfg: Config) -> dict:
         "TIME_STOP_BARS": str(int(cfg.time_stop_bars)),
         "TIME_STOP_MIN_R": str(cfg.time_stop_min_r),
     }
-
-

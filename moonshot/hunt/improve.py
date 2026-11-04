@@ -1,26 +1,9 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import replace
+from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
@@ -32,7 +15,8 @@ from moonshot.config import (
     Config,
 )
 from moonshot.features import (
-    _btc_symbol_in, adx, prepare_data,
+    _btc_symbol_in,
+    prepare_data,
 )
 from moonshot.data import (
     RANGE_SOURCE_MEXC,
@@ -64,20 +48,52 @@ from moonshot.hunt.constants import (
     _week_delta_needed,
 )
 from moonshot.hunt.scoring import (
-    PAPER_SILENCE_ROTATE_HOURS, RESEARCH_MIN_WEEK_EDGE, RESEARCH_PROMOTE_MIN_SEC, WEEK_DAYS, _beats, _candidate_cfgs,
-    _cfg_fingerprint, _champion_from_history, _dedupe_cfgs, _discover_seed_cfgs, _eval_cfg, _eval_soft_oos,
-    _forward_record, _freeze_risk, _grade, _held_streak, _hunt_search_mode, _is_climb_ok,
-    _is_screenable, _is_valid_candidate, _leverage_ladder_cfgs, _material_research_edge, _paper_idle_hours, _prepare_cached,
-    _rank_key, _recent_eval, _week_eval, _wf_eval, _wf_msg,
+    PAPER_SILENCE_ROTATE_HOURS,
+    RESEARCH_MIN_WEEK_EDGE,
+    RESEARCH_PROMOTE_MIN_SEC,
+    WEEK_DAYS,
+    _beats,
+    _candidate_cfgs,
+    _cfg_fingerprint,
+    _champion_from_history,
+    _dedupe_cfgs,
+    _discover_seed_cfgs,
+    _eval_cfg,
+    _eval_soft_oos,
+    _forward_record,
+    _freeze_risk,
+    _grade,
+    _held_streak,
+    _hunt_search_mode,
+    _is_climb_ok,
+    _is_screenable,
+    _is_valid_candidate,
+    _leverage_ladder_cfgs,
+    _material_research_edge,
+    _paper_idle_hours,
+    _prepare_cached,
+    _rank_key,
+    _recent_eval,
+    _week_eval,
+    _wf_eval,
+    _wf_msg,
 )
 
 from moonshot.paths import (
-    ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
-    PAPER_RUNTIME_PATH, RULES_PATH,
+    ENV_PATH,
+    DB_PATH,
 )
+import contextlib
 
-def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
-                 refresh: bool = False, generation: int = 0, hunt: bool = True) -> dict:
+
+def improve_once(
+    symbols: list,
+    bars: int = 5000,
+    oos_frac: float = 0.3,
+    refresh: bool = False,
+    generation: int = 0,
+    hunt: bool = True,
+) -> dict:
     """
     One hunt/improve pass. Keeps the global best-ever; aims at HUNT_TARGETS.
     Never enables live trading.
@@ -86,6 +102,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     """
     try:
         from dotenv import load_dotenv as _ld
+
         _ld(ENV_PATH, override=True)
     except ImportError:
         pass
@@ -107,8 +124,12 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     _live_feed(
         "improve_start",
         f"{mode} pass #{generation} · {search_mode} — {_mode_blurb}",
-        generation=generation, bars=bars, symbols=len(symbols), mode=mode.lower(),
-        search_mode=search_mode, held_streak=held,
+        generation=generation,
+        bars=bars,
+        symbols=len(symbols),
+        mode=mode.lower(),
+        search_mode=search_mode,
+        held_streak=held,
     )
     # Funnel hunt: confirm book (multi-coin) + scout book (BTC only).
     tf_s = str(base.timeframe)
@@ -129,10 +150,18 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     log.info(
         "hunt funnel · scout=%s · confirm ~%dd (%d bars est) × %d symbols tf=%s source=%s",
         ",".join(s.split("/")[0] for s in scout_symbols),
-        hunt_days, bars, len(symbols), tf_s, hunt_src,
+        hunt_days,
+        bars,
+        len(symbols),
+        tf_s,
+        hunt_src,
     )
     raw = _hunt_fetch_raw(
-        symbols, base.timeframe, hunt_tier, refresh=refresh, source=hunt_src,
+        symbols,
+        base.timeframe,
+        hunt_tier,
+        refresh=refresh,
+        source=hunt_src,
     )
     if not raw:
         raise DataError(
@@ -152,7 +181,11 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             return hit
         # Same calendar tier for every TF so 5m vs 15m compare equal wall-clock.
         loaded = _hunt_fetch_raw(
-            symbols, key, hunt_tier, refresh=False, source=hunt_src,
+            symbols,
+            key,
+            hunt_tier,
+            refresh=False,
+            source=hunt_src,
         )
         raw_by_tf[key] = loaded
         return loaded
@@ -180,7 +213,10 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     split = t0 + (fit_end - t0) * (1 - oos_frac)
     log.info(
         "holdout week %s → %s (fit ends %s); split %s",
-        holdout_start.date(), pd.Timestamp(t1).date(), fit_end.date(), split.date(),
+        holdout_start.date(),
+        pd.Timestamp(t1).date(),
+        fit_end.date(),
+        split.date(),
     )
 
     # Walk-forward on history the hunt never sees (before t0). Fail closed on grade.
@@ -188,15 +224,16 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     wf_cache: dict = {}
     try:
         wf_raw = _hunt_fetch_wf_raw(
-            symbols, base.timeframe, t0, refresh=False, source=hunt_src,
+            symbols,
+            base.timeframe,
+            t0,
+            refresh=False,
+            source=hunt_src,
         )
         if not wf_raw:
             raise RuntimeError("no walk-forward history for any symbol")
         min_len = 800 if tf_s in ("3m", "5m") else 1500
-        wf_raw = {
-            s: df for s, df in wf_raw.items()
-            if df is not None and len(df) > min_len
-        }
+        wf_raw = {s: df for s, df in wf_raw.items() if df is not None and len(df) > min_len}
         if not wf_raw:
             raise RuntimeError("walk-forward series too short after filter")
         need_days = 40 if tf_s in ("3m", "5m") else int(HUNT_WF_DAYS) // 2
@@ -220,8 +257,16 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             return _wf_eval(_prepare_cached(wf_raw, cfg, wf_cache), cfg, t0)
         except Exception as e:
             log.warning("walk-forward eval failed: %s", e)
-            return {"ok": False, "why": f"error: {e}", "folds": [], "trades": 0,
-                    "exp": 0.0, "green": "0/0", "worst": 0.0, "span": ""}
+            return {
+                "ok": False,
+                "why": f"error: {e}",
+                "folds": [],
+                "trades": 0,
+                "exp": 0.0,
+                "green": "0/0",
+                "worst": 0.0,
+                "span": "",
+            }
 
     # Forward (paper) record: clock starts when this strategy first ran in paper
     if not state.get("forward_since"):
@@ -235,8 +280,14 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     base_recent = _recent_eval(base_data, base, end=t1)
     base_week = _week_eval(base_data, base, end=t1)  # holdout last 7d
     base_grade = _grade(
-        base_i, base_o, base_soft, base_wf, wf_required=True,
-        fwd=fwd, fwd_required=True, week=base_week,
+        base_i,
+        base_o,
+        base_soft,
+        base_wf,
+        wf_required=True,
+        fwd=fwd,
+        fwd_required=True,
+        week=base_week,
     )
     base_grade["recent"] = base_recent
     base_grade["week"] = base_week
@@ -258,7 +309,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     best_recent = dict(base_recent)
     best_week = dict(base_week)
     best_grade = dict(base_grade)
-    base_wf_ok = (not wf_enabled) or bool(base_wf and base_wf.get("ok"))
+    (not wf_enabled) or bool(base_wf and base_wf.get("ok"))
     promote_reason = "baseline"
 
     def _consider(cand_cfg: Config, ci_, co_, cs_, label_: str = "") -> bool:
@@ -280,7 +331,10 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         crecent = _recent_eval(cdata, cand_cfg, end=t1)
         cweek = _week_eval(cdata, cand_cfg, end=t1)  # holdout only (last 7d)
         week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
-        if int(cweek.get("trades") or 0) < week_min and int(cweek.get("soft_trades") or 0) < week_min:
+        if (
+            int(cweek.get("trades") or 0) < week_min
+            and int(cweek.get("soft_trades") or 0) < week_min
+        ):
             return False
         # Never replace a healthy recent with a worse one
         if not crecent.get("ok") and best_recent_ok:
@@ -301,8 +355,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         # a silent veto while every book is underwater on the same regime).
         week_edge = (
             week_active
-            and float(cweek.get("ret") or 0)
-            > float(best_week.get("ret") or 0) + min_delta
+            and float(cweek.get("ret") or 0) > float(best_week.get("ret") or 0) + min_delta
         )
         # Less-bad OOS / soft when incumbent is losing — lets hunt climb before week flips
         losing_book = float(best_o.total_return) <= 0 or float(best_o.expectancy_r) <= 0
@@ -313,7 +366,8 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         )
         soft_edge = (
             losing_book
-            and cs_ is not None and best_soft is not None
+            and cs_ is not None
+            and best_soft is not None
             and float(cs_.total_return) > float(best_soft.total_return) + 0.005
         )
         recent_edge = (
@@ -321,13 +375,23 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             and float(crecent.get("exp") or 0) >= float(best_recent.get("exp") or 0) - 0.02
         )
         cand_beats = _beats(
-            ci_, co_, best_i, best_o, cs_, best_soft, cweek, best_week,
+            ci_,
+            co_,
+            best_i,
+            best_o,
+            cs_,
+            best_soft,
+            cweek,
+            best_week,
         )
         rescue = (
             (wf_enabled and not best_ok and cand_ok)
             or (not best_recent_ok and bool(crecent.get("ok")))
-            or recent_edge or recent_relative or week_edge
-            or oos_edge or soft_edge
+            or recent_edge
+            or recent_relative
+            or week_edge
+            or oos_edge
+            or soft_edge
         )
         if not cand_beats and not rescue:
             return False
@@ -338,15 +402,26 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         if week_active and cand_week_ret < best_week_ret - 0.001:
             return False
         reason = label_ or (
-            "week_ladder" if week_edge else
-            "recent_rescue" if (recent_edge or recent_relative) else
-            "rank_beat" if cand_beats else "rescue"
+            "week_ladder"
+            if week_edge
+            else "recent_rescue"
+            if (recent_edge or recent_relative)
+            else "rank_beat"
+            if cand_beats
+            else "rescue"
         )
         best_cfg, best_i, best_o, best_soft, best_wf = cand_cfg, ci_, co_, cs_, cwf
         best_recent = crecent
         best_week = cweek
         best_grade = _grade(
-            ci_, co_, cs_, cwf, wf_required=True, fwd=fwd, fwd_required=True, week=cweek,
+            ci_,
+            co_,
+            cs_,
+            cwf,
+            wf_required=True,
+            fwd=fwd,
+            fwd_required=True,
+            week=cweek,
         )
         best_grade["recent"] = crecent
         best_grade["week"] = cweek
@@ -354,51 +429,62 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         return True
 
     def _knobs_to_cfg(kn: dict) -> Config:
-        return _freeze_risk(base, replace(
+        return _freeze_risk(
             base,
-            strategy=str(kn.get("strategy", base.strategy)),
-            timeframe=str(kn.get("timeframe", base.timeframe)),
-            adx_enter=float(kn["adx_enter"]),
-            adx_exit=float(kn.get("adx_exit", float(kn["adx_enter"]) - 6)),
-            volume_multiplier=float(kn["volume_multiplier"]),
-            breakout_buffer_atr=float(kn.get("breakout_buffer_atr", base.breakout_buffer_atr)),
-            breakout_lookback=int(kn.get("breakout_lookback", base.breakout_lookback)),
-            trail_atr_multiple=float(kn.get("trail_atr", base.trail_atr_multiple)),
-            initial_stop_atr=float(kn.get("initial_stop_atr", base.initial_stop_atr)),
-            cooldown_bars=int(kn.get("cooldown_bars", base.cooldown_bars)),
-            require_rising_adx=bool(kn.get("require_rising_adx", base.require_rising_adx)),
-            require_squeeze=bool(kn.get("require_squeeze", base.require_squeeze)),
-            require_rsi_veto=bool(kn.get("require_rsi_veto", base.require_rsi_veto)),
-            require_btc_regime=bool(kn.get("require_btc_regime", base.require_btc_regime)),
-            rsi_long_max=float(kn.get("rsi_long_max", base.rsi_long_max)),
-            rsi_short_min=float(kn.get("rsi_short_min", base.rsi_short_min)),
-            squeeze_lookback=int(kn.get("squeeze_lookback", base.squeeze_lookback)),
-            enable_partial=bool(kn.get("enable_partial", base.enable_partial)),
-            partial_at_r=float(kn.get("partial_at_r", base.partial_at_r)),
-            partial_pct=float(kn.get("partial_pct", base.partial_pct)),
-            enable_time_stop=bool(kn.get("enable_time_stop", base.enable_time_stop)),
-            time_stop_bars=int(kn.get("time_stop_bars", base.time_stop_bars)),
-            time_stop_min_r=float(kn.get("time_stop_min_r", base.time_stop_min_r)),
-            trail_atr_loser=float(kn.get("trail_atr_loser", base.trail_atr_loser)),
-            use_asymmetric_trail=bool(kn.get("use_asymmetric_trail", base.use_asymmetric_trail)),
-            risk_pct=float(kn.get("risk_pct", base.risk_pct)),
-            initial_margin_pct=float(kn.get("initial_margin_pct", base.initial_margin_pct)),
-            aggressive_margin_pct=float(kn.get("aggressive_margin_pct", base.aggressive_margin_pct)),
-            max_daily_loss_pct=float(kn.get("max_daily_loss_pct", base.max_daily_loss_pct)),
-            max_peak_drawdown_pct=float(kn.get("max_peak_drawdown_pct", base.max_peak_drawdown_pct)),
-            mom_lookback=int(kn.get("mom_lookback", base.mom_lookback)),
-            mom_min_atr=float(kn.get("mom_min_atr", base.mom_min_atr)),
-            leverage=int(kn.get("leverage", base.leverage)),
-            max_account_leverage=float(kn.get("max_account_leverage", base.max_account_leverage)),
-            max_net_leverage=float(kn.get("max_net_leverage", base.max_net_leverage)),
-            max_open_positions=int(kn.get("max_open_positions", base.max_open_positions)),
-            h4_ema_fast=int(kn.get("h4_ema_fast", base.h4_ema_fast)),
-            h4_ema_slow=int(kn.get("h4_ema_slow", base.h4_ema_slow)),
-            ema_entry_period=int(kn.get("ema_entry_period", base.ema_entry_period)),
-            pullback_lookback=int(kn.get("pullback_lookback", base.pullback_lookback)),
-            btc_adx_min=float(kn.get("btc_adx_min", base.btc_adx_min)),
-            breadth_min=float(kn.get("breadth_min", base.breadth_min)),
-        ))
+            replace(
+                base,
+                strategy=str(kn.get("strategy", base.strategy)),
+                timeframe=str(kn.get("timeframe", base.timeframe)),
+                adx_enter=float(kn["adx_enter"]),
+                adx_exit=float(kn.get("adx_exit", float(kn["adx_enter"]) - 6)),
+                volume_multiplier=float(kn["volume_multiplier"]),
+                breakout_buffer_atr=float(kn.get("breakout_buffer_atr", base.breakout_buffer_atr)),
+                breakout_lookback=int(kn.get("breakout_lookback", base.breakout_lookback)),
+                trail_atr_multiple=float(kn.get("trail_atr", base.trail_atr_multiple)),
+                initial_stop_atr=float(kn.get("initial_stop_atr", base.initial_stop_atr)),
+                cooldown_bars=int(kn.get("cooldown_bars", base.cooldown_bars)),
+                require_rising_adx=bool(kn.get("require_rising_adx", base.require_rising_adx)),
+                require_squeeze=bool(kn.get("require_squeeze", base.require_squeeze)),
+                require_rsi_veto=bool(kn.get("require_rsi_veto", base.require_rsi_veto)),
+                require_btc_regime=bool(kn.get("require_btc_regime", base.require_btc_regime)),
+                rsi_long_max=float(kn.get("rsi_long_max", base.rsi_long_max)),
+                rsi_short_min=float(kn.get("rsi_short_min", base.rsi_short_min)),
+                squeeze_lookback=int(kn.get("squeeze_lookback", base.squeeze_lookback)),
+                enable_partial=bool(kn.get("enable_partial", base.enable_partial)),
+                partial_at_r=float(kn.get("partial_at_r", base.partial_at_r)),
+                partial_pct=float(kn.get("partial_pct", base.partial_pct)),
+                enable_time_stop=bool(kn.get("enable_time_stop", base.enable_time_stop)),
+                time_stop_bars=int(kn.get("time_stop_bars", base.time_stop_bars)),
+                time_stop_min_r=float(kn.get("time_stop_min_r", base.time_stop_min_r)),
+                trail_atr_loser=float(kn.get("trail_atr_loser", base.trail_atr_loser)),
+                use_asymmetric_trail=bool(
+                    kn.get("use_asymmetric_trail", base.use_asymmetric_trail)
+                ),
+                risk_pct=float(kn.get("risk_pct", base.risk_pct)),
+                initial_margin_pct=float(kn.get("initial_margin_pct", base.initial_margin_pct)),
+                aggressive_margin_pct=float(
+                    kn.get("aggressive_margin_pct", base.aggressive_margin_pct)
+                ),
+                max_daily_loss_pct=float(kn.get("max_daily_loss_pct", base.max_daily_loss_pct)),
+                max_peak_drawdown_pct=float(
+                    kn.get("max_peak_drawdown_pct", base.max_peak_drawdown_pct)
+                ),
+                mom_lookback=int(kn.get("mom_lookback", base.mom_lookback)),
+                mom_min_atr=float(kn.get("mom_min_atr", base.mom_min_atr)),
+                leverage=int(kn.get("leverage", base.leverage)),
+                max_account_leverage=float(
+                    kn.get("max_account_leverage", base.max_account_leverage)
+                ),
+                max_net_leverage=float(kn.get("max_net_leverage", base.max_net_leverage)),
+                max_open_positions=int(kn.get("max_open_positions", base.max_open_positions)),
+                h4_ema_fast=int(kn.get("h4_ema_fast", base.h4_ema_fast)),
+                h4_ema_slow=int(kn.get("h4_ema_slow", base.h4_ema_slow)),
+                ema_entry_period=int(kn.get("ema_entry_period", base.ema_entry_period)),
+                pullback_lookback=int(kn.get("pullback_lookback", base.pullback_lookback)),
+                btc_adx_min=float(kn.get("btc_adx_min", base.btc_adx_min)),
+                breadth_min=float(kn.get("breadth_min", base.breadth_min)),
+            ),
+        )
 
     # Seed from elite — allow cross-family in breakout mode
     if elite and elite.get("knobs"):
@@ -410,17 +496,24 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 and elite_strat != str(base.strategy).strip().lower()
                 and search_mode != "breakout"
             ):
-                raise ValueError(f"elite strategy {elite_strat} != {base.strategy} (wait for breakout)")
+                raise ValueError(
+                    f"elite strategy {elite_strat} != {base.strategy} (wait for breakout)"
+                )
             elite_cfg = _knobs_to_cfg(kn)
             e_raw = _raw_for_tf(elite_cfg.timeframe)
             ed = _prepare_cached(e_raw, elite_cfg, feat_cache)
             ei, eo = _eval_cfg(ed, elite_cfg, split, end=fit_end)
             es = _eval_soft_oos(ed, elite_cfg, split, end=fit_end)
-            if _is_climb_ok(ei, eo, es, base_i, base_o) and _consider(elite_cfg, ei, eo, es, "elite"):
+            if _is_climb_ok(ei, eo, es, base_i, base_o) and _consider(
+                elite_cfg, ei, eo, es, "elite"
+            ):
                 log.info(
                     "restored elite seed score=%d win=%.0f%% test_exp=%+.2f soft=%+.0f%% n=%d",
-                    best_grade["score"], eo.win_rate * 100, eo.expectancy_r,
-                    es.total_return * 100, eo.trades,
+                    best_grade["score"],
+                    eo.win_rate * 100,
+                    eo.expectancy_r,
+                    es.total_return * 100,
+                    eo.trades,
                 )
         except Exception as e:
             log.warning("elite re-eval failed: %s", e)
@@ -456,7 +549,8 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             if pend_week + 0.001 < champ_floor:
                 log.info(
                     "dropping stale pending week=%+.0f%% < champion/base %+0.f%%",
-                    pend_week * 100, champ_floor * 100,
+                    pend_week * 100,
+                    champ_floor * 100,
                 )
                 state.pop("pending_promote", None)
                 _save_autopilot_state(state)
@@ -480,7 +574,6 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     polish_base = best_cfg
     tested = 0
     soft_runs = 0
-    stuck = held >= 2 or search_mode in ("explore", "breakout")
     soft_budget = int(HUNT_SOFT_BUDGET.get(search_mode, 6))
     scout_top = int(HUNT_SCOUT_TOP)
     if held >= int(HUNT_STUCK_HELD):
@@ -489,16 +582,27 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     hard_pool: list = []
     thin_pool: list = []
     cand_list = _candidate_cfgs(
-        polish_base, generation=generation, hunt=hunt, search_mode=search_mode,
+        polish_base,
+        generation=generation,
+        hunt=hunt,
+        search_mode=search_mode,
     )
     cand_list = list(cand_list) + _discover_seed_cfgs(polish_base, generation, held)
     # Density seeds every pass — ADX28/squeeze books starve week samples
     denser = [
         replace(
-            polish_base, strategy=str(st), leverage=int(lev), timeframe="15m",
-            adx_enter=float(adx), adx_exit=float(max(10.0, adx - 5)),
-            require_squeeze=False, require_rising_adx=False, cooldown_bars=int(cd),
-            volume_multiplier=1.1, mom_lookback=8, mom_min_atr=0.35,
+            polish_base,
+            strategy=str(st),
+            leverage=int(lev),
+            timeframe="15m",
+            adx_enter=float(adx),
+            adx_exit=float(max(10.0, adx - 5)),
+            require_squeeze=False,
+            require_rising_adx=False,
+            cooldown_bars=int(cd),
+            volume_multiplier=1.1,
+            mom_lookback=8,
+            mom_min_atr=0.35,
             max_account_leverage=float(max(lev, float(polish_base.max_account_leverage))),
             max_net_leverage=float(max(lev, float(polish_base.max_net_leverage))),
         )
@@ -527,7 +631,9 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             float(cweek_s.get("ret") or -999),
             int(cweek_s.get("trades") or 0),
             _rank_key(ci, co, None),
-            cand, ci, co,
+            cand,
+            ci,
+            co,
         )
         if _is_screenable(ci, co):
             hard_pool.append(row)
@@ -578,13 +684,19 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         if _is_screenable(ci, co):
             try:
                 cweek_r = _week_eval(data, cand, end=t1)
-                rotate_pool.append((
-                    float(cweek_r.get("ret") or -999),
-                    int(cweek_r.get("trades") or 0),
-                    int(cweek_r.get("soft_trades") or 0),
-                    _rank_key(ci, co, cs),
-                    cand, ci, co, cs, cweek_r,
-                ))
+                rotate_pool.append(
+                    (
+                        float(cweek_r.get("ret") or -999),
+                        int(cweek_r.get("trades") or 0),
+                        int(cweek_r.get("soft_trades") or 0),
+                        _rank_key(ci, co, cs),
+                        cand,
+                        ci,
+                        co,
+                        cs,
+                        cweek_r,
+                    )
+                )
             except Exception:
                 pass
         if not _is_climb_ok(ci, co, cs, base_i, base_o):
@@ -597,7 +709,10 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
 
     log.info(
         "funnel confirm: soft-checked %d/%d · climbs accepted=%d · rejects %s",
-        soft_runs, soft_budget, confirm_hits, confirm_rejects,
+        soft_runs,
+        soft_budget,
+        confirm_hits,
+        confirm_rejects,
     )
 
     # ---- Stage 3: leverage bake-off on multi-coin (always try _consider) ----
@@ -619,21 +734,30 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 if _is_climb_ok(ci, co, cs, base_i, base_o):
                     _consider(cand, ci, co, cs, "lev_ladder")
             grade_l = _grade(
-                ci, co, cs, None, wf_required=False, fwd=fwd, fwd_required=False, week=cweek,
+                ci,
+                co,
+                cs,
+                None,
+                wf_required=False,
+                fwd=fwd,
+                fwd_required=False,
+                week=cweek,
             )
-            ladder_rows.append({
-                "leverage": int(cand.leverage),
-                "timeframe": str(cand.timeframe),
-                "strategy": str(cand.strategy),
-                "week_ret": float(cweek.get("ret") or 0),
-                "week_trades": int(cweek.get("trades") or 0),
-                "soft_ret": float(cs.total_return) if cs is not None else None,
-                "test_ret": float(co.total_return),
-                "test_n": int(co.trades),
-                "win": float(co.win_rate),
-                "score": int(grade_l.get("score") or 0),
-                "expectancy": float(co.expectancy_r),
-            })
+            ladder_rows.append(
+                {
+                    "leverage": int(cand.leverage),
+                    "timeframe": str(cand.timeframe),
+                    "strategy": str(cand.strategy),
+                    "week_ret": float(cweek.get("ret") or 0),
+                    "week_trades": int(cweek.get("trades") or 0),
+                    "soft_ret": float(cs.total_return) if cs is not None else None,
+                    "test_ret": float(co.total_return),
+                    "test_n": int(co.trades),
+                    "win": float(co.win_rate),
+                    "score": int(grade_l.get("score") or 0),
+                    "expectancy": float(co.expectancy_r),
+                }
+            )
         except Exception as e:
             log.warning("leverage ladder %sx failed: %s", getattr(cand, "leverage", "?"), e)
     by_lev: dict[int, dict] = {}
@@ -683,10 +807,18 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             best_week = cweek
             best_recent = _recent_eval(
                 _prepare_cached(_raw_for_tf(str(cand.timeframe)) or raw, cand, feat_cache),
-                cand, end=t1,
+                cand,
+                end=t1,
             )
             best_grade = _grade(
-                ci, co, cs, cwf, wf_required=True, fwd=fwd, fwd_required=True, week=cweek,
+                ci,
+                co,
+                cs,
+                cwf,
+                wf_required=True,
+                fwd=fwd,
+                fwd_required=True,
+                week=cweek,
             )
             best_grade["recent"] = best_recent
             best_grade["week"] = cweek
@@ -695,28 +827,33 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             log.info(
                 "silence rotate · paper idle %.1fh · deploying %s %sx@%s week=%+.0f%% n=%d "
                 "(champion holdout no longer freezes Live)",
-                idle_h, cand.strategy, int(cand.leverage), cand.timeframe,
-                float(cweek.get("ret") or 0) * 100, int(wn),
+                idle_h,
+                cand.strategy,
+                int(cand.leverage),
+                cand.timeframe,
+                float(cweek.get("ret") or 0) * 100,
+                int(wn),
             )
             break
         if not silence_rotate:
             log.info(
                 "silence rotate skipped · idle %.1fh but no alternate screenable book in pool (%d)",
-                idle_h, len(rotate_pool),
+                idle_h,
+                len(rotate_pool),
             )
     elif best_cfg is base and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS):
         log.info(
             "silence rotate armed · paper idle %.1fh · held=%d pool=%d (need held>=3 + pool)",
-            idle_h, held, len(rotate_pool),
+            idle_h,
+            held,
+            len(rotate_pool),
         )
 
     # F4 finalist: re-score holdout week on FULL paper symbol book before research promote
     require_wf = bool(HUNT_TARGETS.get("require_walk_forward", True))
     best_wf_ok = bool(best_wf and best_wf.get("ok"))
     # Normal promote needs WF green; silence_rotate may proceed without it.
-    wf_gate_ok = best_wf_ok if (require_wf and wf_enabled) else (
-        (not wf_enabled) or best_wf_ok
-    )
+    wf_gate_ok = best_wf_ok if (require_wf and wf_enabled) else ((not wf_enabled) or best_wf_ok)
     best_week_active = (
         int(best_week.get("trades") or 0) >= week_min
         or int(best_week.get("soft_trades") or 0) >= week_min
@@ -724,11 +861,16 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     # Research promote only on a *material* step — not every ±1% thrash that
     # restarts paper and floods Live activity with setup/upgrade spam.
     material_ok, material_why = _material_research_edge(
-        best_cfg=best_cfg, base_cfg=base,
-        best_grade=best_grade, base_grade=base_grade,
-        best_week=best_week, base_week=base_week,
-        best_o=best_o, base_o=base_o,
-        best_soft=best_soft, base_soft=base_soft,
+        best_cfg=best_cfg,
+        base_cfg=base,
+        best_grade=best_grade,
+        base_grade=base_grade,
+        best_week=best_week,
+        base_week=base_week,
+        best_o=best_o,
+        base_o=base_o,
+        best_soft=best_soft,
+        base_soft=base_soft,
     )
     promote_cooled = True
     last_prom = state.get("research_promote_at")
@@ -768,12 +910,15 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         champ_week_floor = max(champ_live, base_week_ret)
         log.info(
             "champion stale · stored %+0.f%% → live %+0.f%% · promote floor %+0.f%% (peak kept)",
-            champ_stored * 100, champ_live * 100, champ_week_floor * 100,
+            champ_stored * 100,
+            champ_live * 100,
+            champ_week_floor * 100,
         )
         if isinstance(champion, dict):
             champion = dict(champion)
             champion["week_ret_peak"] = max(
-                float(champion.get("week_ret_peak") or champ_stored), champ_stored,
+                float(champion.get("week_ret_peak") or champ_stored),
+                champ_stored,
             )
             champion["week_ret_live"] = champ_live
             state["champion"] = champion
@@ -784,21 +929,17 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         champ_week_floor = min(champ_week_floor, base_week_ret + 0.001)
         log.info(
             "stuck ×%d — promote floor eased to deployed week %+0.f%%",
-            held, champ_week_floor * 100,
+            held,
+            champ_week_floor * 100,
         )
 
     best_week_ret_now = float(best_week.get("ret") or 0)
     # Never research-promote below the (possibly stale-adjusted) champion floor
     # (silence_rotate is the escape hatch when Live is idle under that floor).
-    if (
-        not silence_rotate
-        and best_cfg is not base
-        and best_week_ret_now + 0.001 < champ_week_floor
-    ):
+    if not silence_rotate and best_cfg is not base and best_week_ret_now + 0.001 < champ_week_floor:
         material_ok = False
         material_why = (
-            f"below champion week {champ_week_floor:+.0%} "
-            f"(cand {best_week_ret_now:+.0%})"
+            f"below champion week {champ_week_floor:+.0%} (cand {best_week_ret_now:+.0%})"
         )
 
     research_improved = (
@@ -835,14 +976,18 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         material_why = f"silence_rotate idle={idle_h:.1f}h"
         log.info(
             "silence rotate promote locked in · %s %sx@%s week=%+.0f%%",
-            best_cfg.strategy, int(best_cfg.leverage), best_cfg.timeframe,
+            best_cfg.strategy,
+            int(best_cfg.leverage),
+            best_cfg.timeframe,
             best_week_ret_now * 100,
         )
     elif silence_rotate and not research_improved:
         log.warning(
             "silence rotate selected a book but promote gates still blocked it "
             "(active=%s cooled=%s wf=%s) — check week_min",
-            best_week_active, promote_cooled, wf_gate_ok,
+            best_week_active,
+            promote_cooled,
+            wf_gate_ok,
         )
     if best_cfg is not base and not research_improved:
         log.info(
@@ -873,8 +1018,11 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     if research_improved and len(full_symbols) > len(symbols) and not silence_rotate:
         try:
             f_raw = _hunt_fetch_raw(
-                full_symbols, best_cfg.timeframe, "finalist",
-                refresh=False, source=hunt_src,
+                full_symbols,
+                best_cfg.timeframe,
+                "finalist",
+                refresh=False,
+                source=hunt_src,
             )
             if not f_raw:
                 raise RuntimeError("finalist fetch empty")
@@ -882,7 +1030,8 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             f_t1 = max(sd.bars[-1].Index for sd in f_data.values())
             f_week = _week_eval(f_data, best_cfg, end=f_t1)
             f_soft = _eval_soft_oos(
-                f_data, best_cfg,
+                f_data,
+                best_cfg,
                 min(sd.bars[0].Index for sd in f_data.values())
                 + (f_t1 - min(sd.bars[0].Index for sd in f_data.values())) * (1 - oos_frac),
                 end=pd.Timestamp(f_t1) - pd.Timedelta(days=int(WEEK_DAYS)),
@@ -891,9 +1040,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             f_week_ret = float(f_week.get("ret") or 0)
             # Never throw away a big search-week win just because the wider
             # symbol book is quieter — keep promoting the search climb.
-            big_search_week = (
-                search_week_ret >= float(base_week.get("ret") or 0) + 0.05
-            )
+            big_search_week = search_week_ret >= float(base_week.get("ret") or 0) + 0.05
             if (
                 int(f_week.get("trades") or 0) < week_min
                 and int(f_week.get("soft_trades") or 0) < week_min
@@ -905,9 +1052,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 # Soft floor: only veto when baseline is already healthy; while
                 # climbing out of a hole, full-book soft is informational.
                 f_floor = float(HUNT_TARGETS.get("soft_return_floor", -0.30))
-                base_healthy = (
-                    base_o.expectancy_r > 0 and base_o.total_return > 0
-                )
+                base_healthy = base_o.expectancy_r > 0 and base_o.total_return > 0
                 if base_healthy and f_soft.total_return < f_floor and not big_search_week:
                     log.warning("finalist soft floor fail on full book — skip research promote")
                     research_improved = False
@@ -958,8 +1103,11 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             }
             log.info(
                 "transfer gap · %s holdout %+.0f%% n=%d → MEXC %+.0f%% n=%d",
-                hunt_src, spot_ret * 100, int(best_week.get("trades") or 0),
-                mexc_ret * 100, int(mexc_week.get("trades") or 0),
+                hunt_src,
+                spot_ret * 100,
+                int(best_week.get("trades") or 0),
+                mexc_ret * 100,
+                int(mexc_week.get("trades") or 0),
             )
             if mexc_ret <= 0.0 and spot_ret > 0.0:
                 research_improved = False
@@ -999,9 +1147,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     confirmed = bool(improved and fwd_ok and best_grade.get("targets_met"))
 
     knobs = _cfg_to_knobs(best_cfg)
-    fail_checks = [
-        k for k, v in (best_grade.get("checks") or {}).items() if not v
-    ]
+    fail_checks = [k for k, v in (best_grade.get("checks") or {}).items() if not v]
     decision = {
         "ts": _utc_now().isoformat(),
         "improved": improved,
@@ -1100,12 +1246,18 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         )
         log.info("AUTOPILOT RESEARCH UPGRADE: %s", decision["message"])
         _live_feed(
-            "upgrade", decision["message"], generation=generation,
-            score=best_grade["score"], score_raw=best_grade.get("score_raw"),
-            targets_met=best_grade["targets_met"], promote_tier=promote_tier,
+            "upgrade",
+            decision["message"],
+            generation=generation,
+            score=best_grade["score"],
+            score_raw=best_grade.get("score_raw"),
+            targets_met=best_grade["targets_met"],
+            promote_tier=promote_tier,
             promote_reason=promote_reason,
-            week_return=best_week.get("ret"), week_final=best_week.get("final"),
-            leverage=int(best_cfg.leverage), timeframe=str(best_cfg.timeframe),
+            week_return=best_week.get("ret"),
+            week_final=best_week.get("final"),
+            leverage=int(best_cfg.leverage),
+            timeframe=str(best_cfg.timeframe),
         )
     else:
         hold_why = (
@@ -1121,18 +1273,26 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             f"long-OOS ${best_o.final_equity:.0f} / {best_o.total_return:+.0%} · "
             f"win {best_o.win_rate:.0%}, n={best_o.trades}; "
             f"tried {tested} · {hold_why}. "
-            + ("TARGETS MET — waiting forward proof." if best_grade["targets_met"]
-               else f"Still hunting holdout {int(WEEK_DAYS)}d toward +100%.")
+            + (
+                "TARGETS MET — waiting forward proof."
+                if best_grade["targets_met"]
+                else f"Still hunting holdout {int(WEEK_DAYS)}d toward +100%."
+            )
             + f" [{_wf_msg(best_wf)}]"
         )
         log.info("AUTOPILOT HOLD: %s", decision["message"])
         _live_feed(
             "targets_met" if best_grade["targets_met"] else "hold",
             decision["message"],
-            generation=generation, tested=tested, score=best_grade["score"],
-            targets_met=best_grade["targets_met"], promote_tier="hold",
-            soft_runs=soft_runs, hold_why=hold_why,
-            leverage=int(best_cfg.leverage), timeframe=str(best_cfg.timeframe),
+            generation=generation,
+            tested=tested,
+            score=best_grade["score"],
+            targets_met=best_grade["targets_met"],
+            promote_tier="hold",
+            soft_runs=soft_runs,
+            hold_why=hold_why,
+            leverage=int(best_cfg.leverage),
+            timeframe=str(best_cfg.timeframe),
         )
 
     # Persist progress; elite only with forward proof (F3)
@@ -1201,63 +1361,67 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 "score": raw_score,
                 "knobs": knobs,
                 "week": best_week,
-                **({"week_ret_peak": max(old_week, new_week),
-                    "silence_rotate": True} if silence_rotate else {}),
+                **(
+                    {"week_ret_peak": max(old_week, new_week), "silence_rotate": True}
+                    if silence_rotate
+                    else {}
+                ),
             }
         elif champion:
             state["champion"] = champion
     elif champion:
         state["champion"] = champion
     hist = list(state.get("history") or [])
-    hist.append({
-        "ts": decision["ts"],
-        "generation": generation,
-        "improved": improved,
-        "promote_tier": decision.get("promote_tier"),
-        "promote_reason": promote_reason,
-        "tested": tested,
-        "soft_runs": soft_runs,
-        "search_mode": search_mode,
-        "train_exp": decision["best"]["train_exp"],
-        "test_exp": decision["best"]["test_exp"],
-        "train_n": decision["best"]["train_n"],
-        "test_n": decision["best"]["test_n"],
-        "win": best_grade.get("win"),
-        "test_return": best_grade.get("test_return"),
-        "oos_final": best_grade.get("oos_final"),
-        "soft_return": best_grade.get("soft_return"),
-        "soft_final": best_grade.get("soft_final"),
-        "kill_illusion": best_grade.get("kill_illusion"),
-        "score": best_grade["score"],
-        "score_raw": raw_score,
-        "recent_exp": best_recent.get("exp"),
-        "recent_n": best_recent.get("trades"),
-        "recent_ok": best_recent_ok,
-        "week_return": best_week.get("ret"),
-        "targets_met": best_grade["targets_met"],
-        "strategy": knobs.get("strategy"),
-        "timeframe": knobs.get("timeframe"),
-        "leverage": knobs.get("leverage"),
-        "adx_enter": knobs["adx_enter"],
-        "volume_multiplier": knobs["volume_multiplier"],
-        "risk_pct": knobs.get("risk_pct"),
-        "mom_lookback": knobs.get("mom_lookback"),
-        "mom_min_atr": knobs.get("mom_min_atr"),
-        "require_squeeze": knobs.get("require_squeeze"),
-        "require_rsi_veto": knobs.get("require_rsi_veto"),
-        "require_btc_regime": knobs.get("require_btc_regime"),
-        # Full knobs so a blocked climb can be restored later
-        "knobs": knobs,
-        "leverage_ladder": leverage_ladder,
-    })
+    hist.append(
+        {
+            "ts": decision["ts"],
+            "generation": generation,
+            "improved": improved,
+            "promote_tier": decision.get("promote_tier"),
+            "promote_reason": promote_reason,
+            "tested": tested,
+            "soft_runs": soft_runs,
+            "search_mode": search_mode,
+            "train_exp": decision["best"]["train_exp"],
+            "test_exp": decision["best"]["test_exp"],
+            "train_n": decision["best"]["train_n"],
+            "test_n": decision["best"]["test_n"],
+            "win": best_grade.get("win"),
+            "test_return": best_grade.get("test_return"),
+            "oos_final": best_grade.get("oos_final"),
+            "soft_return": best_grade.get("soft_return"),
+            "soft_final": best_grade.get("soft_final"),
+            "kill_illusion": best_grade.get("kill_illusion"),
+            "score": best_grade["score"],
+            "score_raw": raw_score,
+            "recent_exp": best_recent.get("exp"),
+            "recent_n": best_recent.get("trades"),
+            "recent_ok": best_recent_ok,
+            "week_return": best_week.get("ret"),
+            "targets_met": best_grade["targets_met"],
+            "strategy": knobs.get("strategy"),
+            "timeframe": knobs.get("timeframe"),
+            "leverage": knobs.get("leverage"),
+            "adx_enter": knobs["adx_enter"],
+            "volume_multiplier": knobs["volume_multiplier"],
+            "risk_pct": knobs.get("risk_pct"),
+            "mom_lookback": knobs.get("mom_lookback"),
+            "mom_min_atr": knobs.get("mom_min_atr"),
+            "require_squeeze": knobs.get("require_squeeze"),
+            "require_rsi_veto": knobs.get("require_rsi_veto"),
+            "require_btc_regime": knobs.get("require_btc_regime"),
+            # Full knobs so a blocked climb can be restored later
+            "knobs": knobs,
+            "leverage_ladder": leverage_ladder,
+        }
+    )
     state["history"] = hist[-300:]
     _save_autopilot_state(state)
-    try:
+    with contextlib.suppress(Exception):
         Persistence(str(DB_PATH), mode="paper").log_event(
-            _utc_now(), "*", "autopilot", decision,
+            _utc_now(),
+            "*",
+            "autopilot",
+            decision,
         )
-    except Exception:
-        pass
     return decision
-
-

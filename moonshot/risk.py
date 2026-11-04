@@ -1,24 +1,7 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -26,18 +9,26 @@ import pandas as pd
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    Direction, InstrumentSpec, RiskDecision,
+    Direction,
+    InstrumentSpec,
+    RiskDecision,
 )
 from moonshot.config import (
     Config,
 )
 
+
 class RiskEngine:
-    """Single gatekeeper for new risk. Time always comes from the caller (backtest-safe)."""
+    """Single gatekeeper for new risk. Time always comes from the caller (backtest-safe).
+
+    Live/paper (``silent=False``): peak-DD / expectancy trips are permanent kills.
+    Backtest (``silent=True``): same trips become a timed circuit-breaker pause, then
+    trading resumes so later regimes are still evaluated.
+    """
 
     def __init__(self, cfg: Config, silent: bool = False):
         self.cfg = cfg
-        self.silent = silent  # True in backtests — avoid flooding logs with historical halts
+        self.silent = silent  # True in backtests
         self.reset()
 
     def reset(self, equity: Optional[float] = None) -> None:
@@ -51,10 +42,12 @@ class RiskEngine:
         self.rolling_r: list = []
         self.kill_switch_active = False
         self.halt_reason = ""
+        self.circuit_trips: list[str] = []
+        self._reanchor_peak_on_resume = False
         # Paper-vs-backtest drift band (set from champion / last improve)
         self.drift_min_trades = 20
         self.drift_exp_floor = -0.20
-        self.drift_soft_slack = 0.30  # paper soft ret may sit this far under backtest soft
+        self.drift_soft_slack = 0.30
         self.backtest_soft_ret: Optional[float] = None
         self.backtest_week_ret: Optional[float] = None
         self.drift_halt = False
@@ -82,10 +75,7 @@ class RiskEngine:
         paper_exp: float,
         paper_ret: Optional[float] = None,
     ) -> bool:
-        """Kill new entries when paper drifts outside the backtest band.
-
-        Returns True if a drift halt was tripped (or was already active).
-        """
+        """Permanent halt when paper drifts outside the backtest band (live/paper only)."""
         if self.drift_halt or self.kill_switch_active:
             return True
         if int(n_trades) < int(self.drift_min_trades):
@@ -109,7 +99,11 @@ class RiskEngine:
             return False
         why = "paper drift: " + "; ".join(reasons)
         self.drift_halt = True
-        self._kill(why)
+        # Always permanent — do not soft-pause like backtest circuit breakers.
+        self.kill_switch_active = True
+        self.halt_reason = why
+        if not self.silent:
+            log.warning("KILL SWITCH: %s", why)
         return True
 
     def update_equity(self, equity: float, ts: pd.Timestamp) -> None:
@@ -118,15 +112,18 @@ class RiskEngine:
         if self.current_day is None:
             self.daily_start_equity = equity
         elif day != self.current_day:
-            self.daily_start_equity = self.equity  # last mark of the previous day
-            self.daily_halt = False  # a daily halt only lasts until the next UTC day
+            self.daily_start_equity = self.equity
+            self.daily_halt = False
         self.current_day = day
         self.equity = equity
         self.peak_equity = max(self.peak_equity, equity)
 
         dd = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0.0
         if dd >= self.cfg.max_peak_drawdown_pct:
-            self._kill(f"peak drawdown {dd:.1%} >= {self.cfg.max_peak_drawdown_pct:.0%}")
+            self._trip(
+                f"peak drawdown {dd:.1%} >= {self.cfg.max_peak_drawdown_pct:.0%}",
+                ts,
+            )
         if self.daily_start_equity > 0:
             loss = (self.daily_start_equity - equity) / self.daily_start_equity
             if loss >= self.cfg.max_daily_loss_pct and not self.daily_halt:
@@ -146,17 +143,40 @@ class RiskEngine:
         if len(self.rolling_r) >= w:
             exp = float(np.mean(self.rolling_r[-w:]))
             if exp < self.cfg.expectancy_floor:
-                self._kill(f"rolling {w}-trade expectancy {exp:.2f}R < {self.cfg.expectancy_floor}")
+                self._trip(
+                    f"rolling {w}-trade expectancy {exp:.2f}R < {self.cfg.expectancy_floor}",
+                    ts,
+                )
 
     def trading_allowed(self, ts: pd.Timestamp) -> bool:
         if self.kill_switch_active or self.daily_halt:
             return False
-        return self.pause_until is None or ts >= self.pause_until
+        if self.pause_until is not None and ts < self.pause_until:
+            return False
+        if self.pause_until is not None and ts >= self.pause_until:
+            # Circuit closed — resume with a fresh peak / expectancy window.
+            if self._reanchor_peak_on_resume:
+                self.peak_equity = max(self.equity, 1e-9)
+                self._reanchor_peak_on_resume = False
+            self.rolling_r.clear()
+            self.consecutive_losses = 0
+            self.pause_until = None
+        return True
 
-    def evaluate(self, direction: Direction, entry: float, stop: float, *, equity: float,
-                 open_notional: float, used_margin: float, open_positions: int,
-                 spec: InstrumentSpec, ts: pd.Timestamp,
-                 net_notional: float = 0.0) -> RiskDecision:
+    def evaluate(
+        self,
+        direction: Direction,
+        entry: float,
+        stop: float,
+        *,
+        equity: float,
+        open_notional: float,
+        used_margin: float,
+        open_positions: int,
+        spec: InstrumentSpec,
+        ts: pd.Timestamp,
+        net_notional: float = 0.0,
+    ) -> RiskDecision:
         cfg = self.cfg
         no = lambda why: RiskDecision(False, why)  # noqa: E731
         if not self.trading_allowed(ts):
@@ -175,7 +195,6 @@ class RiskEngine:
         q_margin = equity * margin_pct * lev / entry
         q_free = max(0.0, equity - used_margin) * lev / entry
         q_lev = max(0.0, equity * cfg.max_account_leverage - open_notional) / entry
-        # Directional book brake: room left before |net signed notional| hits max_net_leverage
         net_cap = max(0.0, equity * float(cfg.max_net_leverage))
         room = max(0.0, net_cap - direction.sign * net_notional)
         q_net = room / entry if entry > 0 else 0.0
@@ -198,11 +217,28 @@ class RiskEngine:
             return no(f"stop {stop_pct:.2%} > {thr:.0%} of liq distance {liq_dist_pct:.2%}")
         return RiskDecision(True, "ok", qty, qty * entry / lev, lev, qty * stop_dist)
 
-    def _kill(self, reason: str) -> None:
-        if not self.kill_switch_active:
-            self.kill_switch_active = True
-            self.halt_reason = reason
-            if not self.silent:
-                log.warning("KILL SWITCH: %s", reason)
+    def _trip(self, reason: str, ts: pd.Timestamp) -> None:
+        """Live: permanent kill. Backtest: timed pause then resume."""
+        if self.kill_switch_active:
+            return
+        if self.silent:
+            hours = max(1.0, float(getattr(self.cfg, "kill_resume_hours", 168.0)))
+            until = pd.Timestamp(ts) + pd.Timedelta(hours=hours)
+            if self.pause_until is None or until > self.pause_until:
+                self.pause_until = until
+            self._reanchor_peak_on_resume = True
+            self.rolling_r.clear()
+            self.consecutive_losses = 0
+            note = f"{reason} → backtest pause {hours / 24.0:.0f}d until {until:%Y-%m-%d}"
+            self.halt_reason = note
+            self.circuit_trips.append(note)
+            return
+        self.kill_switch_active = True
+        self.halt_reason = reason
+        log.warning("KILL SWITCH: %s", reason)
 
-
+    # Back-compat alias used by older call sites / tests
+    def _kill(self, reason: str, ts: Optional[pd.Timestamp] = None) -> None:
+        if ts is None:
+            ts = pd.Timestamp.now(tz="UTC")
+        self._trip(reason, ts)

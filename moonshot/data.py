@@ -1,22 +1,9 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
 import threading
 import time
-import uuid
 import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,10 +13,12 @@ import pandas as pd
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    DataError, _pandas_tf,
+    DataError,
+    _pandas_tf,
 )
 
-from moonshot.paths import ROOT, CACHE_DIR
+from moonshot.paths import CACHE_DIR
+import contextlib
 
 
 _TF_UNITS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
@@ -71,18 +60,25 @@ def _ohlcv_resample(df: pd.DataFrame, tf: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     rule = _pandas_tf(tf)
-    out = df.resample(rule, label="left", closed="left").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    }).dropna(subset=["open", "high", "low", "close"])
+    out = (
+        df.resample(rule, label="left", closed="left")
+        .agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        )
+        .dropna(subset=["open", "high", "low", "close"])
+    )
     return out
 
 
-def paged_ohlcv(ex: Any, symbol: str, tf: str, since_ms: int, until_ms: int,
-                page: int = 1000) -> list:
+def paged_ohlcv(
+    ex: Any, symbol: str, tf: str, since_ms: int, until_ms: int, page: int = 1000
+) -> list:
     """Paginate fetch_ohlcv forward from since_ms (exchanges cap one call).
 
     If ``since_ms`` is before the market listed, MEXC returns ``[]`` on the
@@ -163,8 +159,7 @@ def _normalize_range_source(source: Optional[str]) -> str:
     s = str(source or RANGE_SOURCE_MEXC).strip().lower()
     if s not in RANGE_PRICE_SOURCES:
         raise DataError(
-            f"unknown price source {source!r}; "
-            f"expected one of {', '.join(RANGE_PRICE_SOURCES)}"
+            f"unknown price source {source!r}; expected one of {', '.join(RANGE_PRICE_SOURCES)}"
         )
     return s
 
@@ -250,8 +245,9 @@ def _ohlcv_is_stale(df: pd.DataFrame, tf: str, *, max_age_bars: float = 1.0) -> 
     return last < expected - slack
 
 
-def _tail_merge_ohlcv(df: pd.DataFrame, symbol: str, tf: str, bars: int,
-                      ex: Optional[Any] = None) -> pd.DataFrame:
+def _tail_merge_ohlcv(
+    df: pd.DataFrame, symbol: str, tf: str, bars: int, ex: Optional[Any] = None
+) -> pd.DataFrame:
     """Fetch candles after the cached last bar and merge; drop forming candle."""
     if df is None or df.empty:
         return df
@@ -279,8 +275,9 @@ def _tail_merge_ohlcv(df: pd.DataFrame, symbol: str, tf: str, bars: int,
     return out.tail(max(int(bars), len(out)))
 
 
-def clear_stale_live_caches(cache_dir: str = str(CACHE_DIR),
-                            tf: str = "15m", bars: int = 1200) -> int:
+def clear_stale_live_caches(
+    cache_dir: str = str(CACHE_DIR), tf: str = "15m", bars: int = 1200
+) -> int:
     """Delete live-sized CSV caches whose last bar is stale (unblocks paper)."""
     cache = Path(cache_dir)
     if not cache.exists():
@@ -303,8 +300,13 @@ def clear_stale_live_caches(cache_dir: str = str(CACHE_DIR),
     return removed
 
 
-def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
-                     cache_dir: str = str(CACHE_DIR), refresh: bool = False) -> pd.DataFrame:
+def fetch_historical(
+    symbol: str,
+    tf: str = "4h",
+    bars: int = 3000,
+    cache_dir: str = str(CACHE_DIR),
+    refresh: bool = False,
+) -> pd.DataFrame:
     """Paginated history with a CSV cache + incremental tail refresh when stale.
 
     TFs missing on MEXC contracts (``3m``, ``2h``) are resampled from a finer base.
@@ -315,7 +317,11 @@ def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
         ratio = max(1, int(timeframe_ms(tf) // timeframe_ms(base_tf)))
         src_bars = int(bars) * ratio + ratio  # +1 bucket of slack
         raw = fetch_historical(
-            symbol, base_tf, src_bars, cache_dir=cache_dir, refresh=refresh,
+            symbol,
+            base_tf,
+            src_bars,
+            cache_dir=cache_dir,
+            refresh=refresh,
         )
         if raw is None or raw.empty:
             raise DataError(f"no {base_tf} history to build {tf} for {symbol}")
@@ -326,13 +332,15 @@ def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
         cache.mkdir(exist_ok=True)
         path = cache / f"{_cache_stem(symbol, tf)}{int(bars)}.csv"
         out = built.tail(int(bars)) if len(built) > int(bars) else built
-        try:
+        with contextlib.suppress(Exception):
             out.to_csv(path)
-        except Exception:
-            pass
         log.info(
             "%s %s built from %s (%d → %d bars)",
-            symbol, tf, base_tf, len(raw), len(out),
+            symbol,
+            tf,
+            base_tf,
+            len(raw),
+            len(out),
         )
         return out
 
@@ -364,10 +372,8 @@ def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
 
     def _persist(df: pd.DataFrame) -> pd.DataFrame:
         out = df.tail(int(bars)) if len(df) > int(bars) else df
-        try:
+        with contextlib.suppress(Exception):
             out.to_csv(path)
-        except Exception:
-            pass
         return out
 
     def _ensure_fresh(df: pd.DataFrame) -> pd.DataFrame:
@@ -423,7 +429,10 @@ def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
             if len(df) > 0:
                 log.warning(
                     "%s %s: only %d cached bars (asked %d) — using available history",
-                    symbol, tf, len(df), bars,
+                    symbol,
+                    tf,
+                    len(df),
+                    bars,
                 )
                 return _ensure_fresh(df)
         raise DataError(
@@ -437,7 +446,10 @@ def fetch_historical(symbol: str, tf: str = "4h", bars: int = 3000,
     if len(df) < int(bars) * 0.5:
         log.warning(
             "%s %s: exchange only returned %d/%d bars (coin listed later than window)",
-            symbol, tf, len(df), bars,
+            symbol,
+            tf,
+            len(df),
+            bars,
         )
     return _persist(df)
 
@@ -534,7 +546,11 @@ def pick_range_timeframe(
         warm = range_warmup_bars(tf)
         n_out = estimate_range_bars(tf, start, end, warmup_bars=warm)
         n_fetch = estimate_range_fetch_bars(
-            tf, start, end, source=src, warmup_bars=warm,
+            tf,
+            start,
+            end,
+            source=src,
+            warmup_bars=warm,
         )
         if 0 < n_fetch <= int(max_bars) and n_out > 0:
             note = ""
@@ -562,7 +578,11 @@ def pick_range_timeframe(
     warm = range_warmup_bars(preferred)
     n = estimate_range_bars(preferred, start, end, warmup_bars=warm)
     n_fetch = estimate_range_fetch_bars(
-        preferred, start, end, source=src, warmup_bars=warm,
+        preferred,
+        start,
+        end,
+        source=src,
+        warmup_bars=warm,
     )
     note = (
         f"Book {preferred} needs ~{max(n, n_fetch):,} download bars "
@@ -621,16 +641,15 @@ def fetch_yahoo_ohlcv_range(
         raise DataError(f"Yahoo response for {ticker} missing columns: {sorted(missing)}")
 
     vol_col = "volume" if "volume" in raw.columns else None
-    df = pd.DataFrame({
-        "open": pd.to_numeric(raw["open"], errors="coerce"),
-        "high": pd.to_numeric(raw["high"], errors="coerce"),
-        "low": pd.to_numeric(raw["low"], errors="coerce"),
-        "close": pd.to_numeric(raw["close"], errors="coerce"),
-        "volume": (
-            pd.to_numeric(raw[vol_col], errors="coerce")
-            if vol_col else 0.0
-        ),
-    })
+    df = pd.DataFrame(
+        {
+            "open": pd.to_numeric(raw["open"], errors="coerce"),
+            "high": pd.to_numeric(raw["high"], errors="coerce"),
+            "low": pd.to_numeric(raw["low"], errors="coerce"),
+            "close": pd.to_numeric(raw["close"], errors="coerce"),
+            "volume": (pd.to_numeric(raw[vol_col], errors="coerce") if vol_col else 0.0),
+        }
+    )
     df.index = pd.to_datetime(df.index, utc=True)
     df = df.dropna(subset=["open", "high", "low", "close"]).sort_index()
     # Drop still-forming daily candle (same rule as ohlcv_to_frame).
@@ -697,7 +716,9 @@ def probe_earliest_ohlcv(
             else:
                 lo = mid
         # One final pull from the refined lower bound.
-        final = ex.fetch_ohlcv(market, timeframe=tf, since=max(0, (best or hi) - step_ms * 50), limit=50)
+        final = ex.fetch_ohlcv(
+            market, timeframe=tf, since=max(0, (best or hi) - step_ms * 50), limit=50
+        )
         time.sleep(getattr(ex, "rateLimit", 100) / 1000.0)
     if final:
         return pd.Timestamp(int(final[0][0]), unit="ms", tz="UTC")
@@ -766,9 +787,7 @@ def _range_no_history_error(
             "Try another coin or a more recent start."
         ),
     }.get(src, "No candles in that window.")
-    return DataError(
-        f"no {tf} bars for {symbol} in {t0:%Y-%m-%d}→{t1:%Y-%m-%d}. {hint}"
-    )
+    return DataError(f"no {tf} bars for {symbol} in {t0:%Y-%m-%d}→{t1:%Y-%m-%d}. {hint}")
 
 
 def fetch_historical_range(
@@ -815,14 +834,17 @@ def fetch_historical_range(
     fetch_end = min(t1, now)
     if fetch_start >= fetch_end:
         raise DataError(
-            f"range is empty after clamping to now ({symbol} {tf}: "
-            f"{fetch_start} → {fetch_end})"
+            f"range is empty after clamping to now ({symbol} {tf}: {fetch_start} → {fetch_end})"
         )
 
     est_bars = int((fetch_end - fetch_start).total_seconds() * 1000 // step_ms) + 2
     # Cap against download size (native/base TF), not post-resample candle count.
     est_fetch = estimate_range_fetch_bars(
-        tf, t0, t1, source=src, warmup_bars=warm,
+        tf,
+        t0,
+        t1,
+        source=src,
+        warmup_bars=warm,
     )
     if est_fetch > _MAX_RANGE_BARS:
         base_tf = _resample_base_tf(tf, source=src)
@@ -841,13 +863,14 @@ def fetch_historical_range(
     base_tf = _resample_base_tf(tf, source=src)
     if base_tf is not None:
         if src == RANGE_SOURCE_YAHOO:
-            raise DataError(
-                f"Yahoo cannot build {tf} — use 1d or pick MEXC / Binance spot."
-            )
+            raise DataError(f"Yahoo cannot build {tf} — use 1d or pick MEXC / Binance spot.")
         base_ms = timeframe_ms(base_tf)
         ratio = max(1, int(step_ms // base_ms))
         raw = fetch_historical_range(
-            symbol, base_tf, t0, t1,
+            symbol,
+            base_tf,
+            t0,
+            t1,
             warmup_bars=warm * ratio,
             cache_dir=cache_dir,
             refresh=refresh,
@@ -891,13 +914,15 @@ def fetch_historical_range(
             raise DataError(f"Yahoo fetch failed for {symbol}: {e}") from e
         if df.empty:
             raise _range_no_history_error(symbol, tf, t0, t1, source=src)
-        try:
+        with contextlib.suppress(Exception):
             df.to_csv(path)
-        except Exception:
-            pass
         log.info(
             "%s yahoo 1d range %s→%s (+%d warmup) → %d bars",
-            symbol, t0.date(), t1.date(), warm, len(df),
+            symbol,
+            t0.date(),
+            t1.date(),
+            warm,
+            len(df),
         )
         return df
 
@@ -927,13 +952,17 @@ def fetch_historical_range(
     df = df[(df.index >= fetch_start) & (df.index < fetch_end)]
     if df.empty:
         raise _range_no_history_error(symbol, tf, t0, t1, got=None, source=src)
-    try:
+    with contextlib.suppress(Exception):
         df.to_csv(path)
-    except Exception:
-        pass
     log.info(
         "%s %s %s range %s→%s (+%d warmup) → %d bars",
-        symbol, src, tf, t0.date(), t1.date(), warm, len(df),
+        symbol,
+        src,
+        tf,
+        t0.date(),
+        t1.date(),
+        warm,
+        len(df),
     )
     return df
 
@@ -945,7 +974,7 @@ def synthetic_ohlcv(symbol: str, n: int, tf: str = "4h") -> pd.DataFrame:
     i = 0
     while i < n:
         length = int(rng.integers(60, 400))
-        drift[i:i + length] = rng.choice([0.0015, -0.0015, 0.0003, 0.0])
+        drift[i : i + length] = rng.choice([0.0015, -0.0015, 0.0003, 0.0])
         i += length
     sigma = 0.008 * np.exp(0.25 * np.cumsum(rng.normal(0, 0.1, n)) * 0.1)
     rets = drift + rng.normal(0, 1, n) * sigma
@@ -955,7 +984,6 @@ def synthetic_ohlcv(symbol: str, n: int, tf: str = "4h") -> pd.DataFrame:
     low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.004, n)))
     volume = 2000 * (1 + 40 * np.abs(rets)) * rng.lognormal(0, 0.3, n)
     idx = pd.date_range("2024-01-01", periods=n, freq=_pandas_tf(tf), tz="UTC")
-    return pd.DataFrame({"open": open_, "high": high, "low": low,
-                         "close": close, "volume": volume}, index=idx)
-
-
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=idx
+    )

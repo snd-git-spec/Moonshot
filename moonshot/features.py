@@ -1,23 +1,7 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -26,11 +10,13 @@ import pandas as pd
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    InstrumentSpec, RegimeState,
+    InstrumentSpec,
+    RegimeState,
 )
 from moonshot.config import (
     Config,
 )
+
 
 def ema(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(span=period, adjust=False, min_periods=period).mean()
@@ -140,9 +126,8 @@ def build_features(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     f["squeeze"] = squeeze_now.fillna(False)
     # Allow entry if we were compressed recently (breakout after coil)
     f["squeeze_ok"] = (
-        f["squeeze"].astype(float)
-        .rolling(cfg.squeeze_lookback, min_periods=1).max()
-        .fillna(0.0) > 0.0
+        f["squeeze"].astype(float).rolling(cfg.squeeze_lookback, min_periods=1).max().fillna(0.0)
+        > 0.0
     )
 
     # 15m pullback timing: touched EMA_entry recently (within ~0.75 ATR)
@@ -154,8 +139,12 @@ def build_features(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     near_short = (f["high"] >= f["ema_entry"] - 0.35 * atr_safe) & (
         f["high"] <= f["ema_entry"] + 0.75 * atr_safe
     )
-    f["pullback_long"] = near_long.fillna(False).astype(float).rolling(pb_n, min_periods=1).max() > 0
-    f["pullback_short"] = near_short.fillna(False).astype(float).rolling(pb_n, min_periods=1).max() > 0
+    f["pullback_long"] = (
+        near_long.fillna(False).astype(float).rolling(pb_n, min_periods=1).max() > 0
+    )
+    f["pullback_short"] = (
+        near_short.fillna(False).astype(float).rolling(pb_n, min_periods=1).max() > 0
+    )
 
     daily = resample_to_daily(f)
     daily["ema_d"] = ema(daily["close"], cfg.ema_daily_period)
@@ -186,8 +175,11 @@ def build_features(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     f["regime"] = np.where(
         ~valid,
         RegimeState.UNKNOWN.value,
-        np.where(up, RegimeState.TRENDING_UP.value,
-                 np.where(dn, RegimeState.TRENDING_DOWN.value, RegimeState.RANGING.value)),
+        np.where(
+            up,
+            RegimeState.TRENDING_UP.value,
+            np.where(dn, RegimeState.TRENDING_DOWN.value, RegimeState.RANGING.value),
+        ),
     )
     f["adx_slope"] = f["adx"].diff()
     # Filled later by prepare_data when BTC is available; 0 = neutral/unknown
@@ -222,13 +214,18 @@ class SymbolData:
     spec: InstrumentSpec
 
 
-def prepare_symbol(symbol: str, df: pd.DataFrame, cfg: Config,
-                   spec: Optional[InstrumentSpec] = None,
-                   feats: Optional[pd.DataFrame] = None) -> SymbolData:
+def prepare_symbol(
+    symbol: str,
+    df: pd.DataFrame,
+    cfg: Config,
+    spec: Optional[InstrumentSpec] = None,
+    feats: Optional[pd.DataFrame] = None,
+) -> SymbolData:
     frame = feats if feats is not None else build_features(df, cfg)
     bars = list(frame.itertuples(name="Bar"))
-    return SymbolData(symbol, bars, {b.Index: i for i, b in enumerate(bars)},
-                      spec or InstrumentSpec(symbol))
+    return SymbolData(
+        symbol, bars, {b.Index: i for i, b in enumerate(bars)}, spec or InstrumentSpec(symbol)
+    )
 
 
 def prepare_data(raw: dict, cfg: Config) -> dict:
@@ -257,5 +254,3 @@ def prepare_data(raw: dict, cfg: Config) -> dict:
         f["btc_adx"] = btc_adx.reindex(f.index).ffill().fillna(0.0)
         f["breadth"] = breadth.reindex(f.index).ffill().fillna(0.0)
     return {s: prepare_symbol(s, raw[s], cfg, feats=f) for s, f in feats.items()}
-
-

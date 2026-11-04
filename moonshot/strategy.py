@@ -1,32 +1,15 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
-import pandas as pd
 
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    Direction, RegimeState, Signal,
+    Direction,
+    RegimeState,
+    Signal,
 )
 from moonshot.config import (
     Config,
@@ -34,6 +17,7 @@ from moonshot.config import (
 from moonshot.features import (
     _is_btc_symbol,
 )
+
 
 class RegimeBreakoutStrategy:
     """
@@ -91,11 +75,23 @@ class RegimeBreakoutStrategy:
         tag = (" " + " ".join(tags)) if tags else ""
 
         if want_long and bar.close > bar.don_high + buf:
-            return Signal(symbol, Direction.LONG, bar.close, bar.atr, RegimeState.TRENDING_UP,
-                          f"breakout>{bar.don_high:.4g}+buf ADX={bar.adx:.1f}↑ vol x{bar.vol_ratio:.1f}{tag}")
+            return Signal(
+                symbol,
+                Direction.LONG,
+                bar.close,
+                bar.atr,
+                RegimeState.TRENDING_UP,
+                f"breakout>{bar.don_high:.4g}+buf ADX={bar.adx:.1f}↑ vol x{bar.vol_ratio:.1f}{tag}",
+            )
         if (not want_long) and bar.close < bar.don_low - buf:
-            return Signal(symbol, Direction.SHORT, bar.close, bar.atr, RegimeState.TRENDING_DOWN,
-                          f"breakdown<{bar.don_low:.4g}-buf ADX={bar.adx:.1f}↑ vol x{bar.vol_ratio:.1f}{tag}")
+            return Signal(
+                symbol,
+                Direction.SHORT,
+                bar.close,
+                bar.atr,
+                RegimeState.TRENDING_DOWN,
+                f"breakdown<{bar.don_low:.4g}-buf ADX={bar.adx:.1f}↑ vol x{bar.vol_ratio:.1f}{tag}",
+            )
         return None
 
 
@@ -157,10 +153,12 @@ class Momentum15Strategy:
 
         tag = f"mom={mom:+.2f}ATR ADX={bar.adx:.1f} vol x{bar.vol_ratio:.1f}"
         if want_long:
-            return Signal(symbol, Direction.LONG, bar.close, bar.atr,
-                          RegimeState.TRENDING_UP, f"mom_up {tag}")
-        return Signal(symbol, Direction.SHORT, bar.close, bar.atr,
-                      RegimeState.TRENDING_DOWN, f"mom_dn {tag}")
+            return Signal(
+                symbol, Direction.LONG, bar.close, bar.atr, RegimeState.TRENDING_UP, f"mom_up {tag}"
+            )
+        return Signal(
+            symbol, Direction.SHORT, bar.close, bar.atr, RegimeState.TRENDING_DOWN, f"mom_dn {tag}"
+        )
 
 
 class TrendMTFStrategy:
@@ -242,10 +240,22 @@ class TrendMTFStrategy:
             f"h4ADX={h4_adx if h4_adx == h4_adx else 0:.0f} vol x{bar.vol_ratio:.1f}"
         )
         if want_long:
-            return Signal(symbol, Direction.LONG, bar.close, bar.atr,
-                          RegimeState.TRENDING_UP, f"mtf_long {tag}")
-        return Signal(symbol, Direction.SHORT, bar.close, bar.atr,
-                      RegimeState.TRENDING_DOWN, f"mtf_short {tag}")
+            return Signal(
+                symbol,
+                Direction.LONG,
+                bar.close,
+                bar.atr,
+                RegimeState.TRENDING_UP,
+                f"mtf_long {tag}",
+            )
+        return Signal(
+            symbol,
+            Direction.SHORT,
+            bar.close,
+            bar.atr,
+            RegimeState.TRENDING_DOWN,
+            f"mtf_short {tag}",
+        )
 
 
 class MomentumRuleStrategy:
@@ -268,11 +278,20 @@ class MomentumRuleStrategy:
             return None
         if not (rsi_v > self.cfg.rsi_rule_min and e50 > e200 and bar.adx >= self.cfg.adx_enter):
             return None
-        if self.cfg.require_btc_regime and not _is_btc_symbol(symbol):
-            if float(getattr(bar, "btc_trend", 0.0) or 0.0) <= 0:
-                return None
-        return Signal(symbol, Direction.LONG, bar.close, bar.atr, RegimeState.TRENDING_UP,
-                      f"rule_long rsi={rsi_v:.0f} adx={bar.adx:.0f} ema50>200")
+        if (
+            self.cfg.require_btc_regime
+            and not _is_btc_symbol(symbol)
+            and float(getattr(bar, "btc_trend", 0.0) or 0.0) <= 0
+        ):
+            return None
+        return Signal(
+            symbol,
+            Direction.LONG,
+            bar.close,
+            bar.atr,
+            RegimeState.TRENDING_UP,
+            f"rule_long rsi={rsi_v:.0f} adx={bar.adx:.0f} ema50>200",
+        )
 
 
 class ComboStrategy:
@@ -332,5 +351,3 @@ def regime_hostile(direction: Direction, regime: Any) -> bool:
     if direction is Direction.LONG:
         return r == RegimeState.TRENDING_DOWN.value
     return r == RegimeState.TRENDING_UP.value
-
-

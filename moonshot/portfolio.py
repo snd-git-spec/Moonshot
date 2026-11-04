@@ -1,42 +1,29 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-import numpy as np
-import pandas as pd
 
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    Action, ActionKind, AddDecision, ExitReason, InstrumentSpec,
+    Action,
+    ActionKind,
+    AddDecision,
+    ExitReason,
+    InstrumentSpec,
 )
 from moonshot.config import (
     Config,
 )
 from moonshot.strategy import (
-    regime_aligned, regime_hostile,
+    regime_aligned,
+    regime_hostile,
 )
 from moonshot.position import (
     Position,
 )
+
 
 class RollManager:
     """Conditional pyramiding. Sizing is 'free-roll': an add may never turn a locked-in
@@ -45,8 +32,15 @@ class RollManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def size_add(self, pos: Position, price: float, new_stop: float, equity: float,
-                 used_margin: float, spec: InstrumentSpec) -> tuple:
+    def size_add(
+        self,
+        pos: Position,
+        price: float,
+        new_stop: float,
+        equity: float,
+        used_margin: float,
+        spec: InstrumentSpec,
+    ) -> tuple:
         cfg = self.cfg
         floating = pos.unrealized(price)
         if floating <= 0:
@@ -72,9 +66,17 @@ class RollManager:
             return None, AddDecision.BLOCK_SIZE_TOO_SMALL
         return qty, AddDecision.ALLOW
 
-    def evaluate_add(self, pos: Position, price: float, stop_candidate: float, regime: Any,
-                     allowed: bool, equity: float, used_margin: float,
-                     spec: InstrumentSpec) -> tuple:
+    def evaluate_add(
+        self,
+        pos: Position,
+        price: float,
+        stop_candidate: float,
+        regime: Any,
+        allowed: bool,
+        equity: float,
+        used_margin: float,
+        spec: InstrumentSpec,
+    ) -> tuple:
         cfg = self.cfg
         if not allowed:
             return AddDecision.BLOCK_TRADING_HALTED, None
@@ -97,8 +99,17 @@ class PositionManager:
         self.cfg = cfg
         self.roll = RollManager(cfg)
 
-    def decide(self, pos: Position, bar: Any, *, allowed: bool, kill: bool, equity: float,
-               used_margin: float, spec: InstrumentSpec) -> list:
+    def decide(
+        self,
+        pos: Position,
+        bar: Any,
+        *,
+        allowed: bool,
+        kill: bool,
+        equity: float,
+        used_margin: float,
+        spec: InstrumentSpec,
+    ) -> list:
         cfg = self.cfg
         if kill:
             return [Action(ActionKind.EXIT, reason=ExitReason.KILL_SWITCH)]
@@ -106,20 +117,20 @@ class PositionManager:
         # Grace ≥1 closed bar. Exit only on *hostile* regime (opposite trend) —
         # never on unknown/ranging (warmup + MTF/mom entries ignore bar.regime).
         held = pos.bars_held(getattr(bar, "Index", None), cfg.bar_td)
-        if (
-            cfg.exit_on_regime_invalid
-            and held >= 1
-            and regime_hostile(pos.direction, regime)
-        ):
+        if cfg.exit_on_regime_invalid and held >= 1 and regime_hostile(pos.direction, regime):
             return [Action(ActionKind.EXIT, reason=ExitReason.REGIME_INVALID)]
 
         close = bar.close
         r_now = pos.r_multiple(close)
 
         # Time stop: if the trade never reaches +min_r within N bars, dump it
-        if cfg.enable_time_stop and cfg.time_stop_bars > 0:
-            if held >= cfg.time_stop_bars and r_now < cfg.time_stop_min_r:
-                return [Action(ActionKind.EXIT, reason=ExitReason.TIME_STOP)]
+        if (
+            cfg.enable_time_stop
+            and cfg.time_stop_bars > 0
+            and held >= cfg.time_stop_bars
+            and r_now < cfg.time_stop_min_r
+        ):
+            return [Action(ActionKind.EXIT, reason=ExitReason.TIME_STOP)]
 
         stop = pos.current_stop
         if bar.atr == bar.atr and bar.atr > 0:
@@ -138,13 +149,12 @@ class PositionManager:
                 stop = max(stop, pos.avg_entry) if pos.sign > 0 else min(stop, pos.avg_entry)
 
         if cfg.enable_pyramiding:
-            decision, _ = self.roll.evaluate_add(pos, close, stop, regime, allowed, equity,
-                                                 used_margin, spec)
+            decision, _ = self.roll.evaluate_add(
+                pos, close, stop, regime, allowed, equity, used_margin, spec
+            )
             if decision is AddDecision.ALLOW:
                 acts.append(Action(ActionKind.ADD, price=stop))
 
         if stop != pos.current_stop:
             acts.append(Action(ActionKind.MOVE_STOP, price=stop))
         return acts
-
-

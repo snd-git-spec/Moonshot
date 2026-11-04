@@ -1,24 +1,8 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -26,14 +10,20 @@ import pandas as pd
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    ActionKind, AddDecision, Direction, ExitReason, InstrumentSpec, RegimeState,
+    ActionKind,
+    AddDecision,
+    Direction,
+    ExitReason,
+    InstrumentSpec,
+    RegimeState,
     RiskError,
 )
 from moonshot.config import (
     Config,
 )
 from moonshot.features import (
-    atr, build_features, prepare_data,
+    build_features,
+    prepare_data,
 )
 from moonshot.data import (
     synthetic_ohlcv,
@@ -48,7 +38,8 @@ from moonshot.risk import (
     RiskEngine,
 )
 from moonshot.portfolio import (
-    PositionManager, RollManager,
+    PositionManager,
+    RollManager,
 )
 from moonshot.brokers import (
     PaperBroker,
@@ -57,8 +48,10 @@ from moonshot.backtest import (
     BacktestEngine,
 )
 from moonshot.hunt.scoring import (
-    FWD_SCORE_CAP, _grade,
+    FWD_SCORE_CAP,
+    _grade,
 )
+
 
 def selftest() -> bool:
     cfg = Config()
@@ -77,7 +70,10 @@ def selftest() -> bool:
     cols = ["ema_htf", "atr", "adx", "vol_ratio", "don_high", "d_close", "d_ema"]
     same = np.allclose(full[cols].iloc[:k].to_numpy(), trunc[cols].to_numpy(), equal_nan=True)
     check("features have no lookahead (numeric)", same)
-    check("regime has no lookahead", (full["regime"].iloc[:k].to_numpy() == trunc["regime"].to_numpy()).all())
+    check(
+        "regime has no lookahead",
+        (full["regime"].iloc[:k].to_numpy() == trunc["regime"].to_numpy()).all(),
+    )
 
     # 2) average-entry accounting
     t0 = pd.Timestamp("2025-01-01", tz="UTC")
@@ -91,7 +87,14 @@ def selftest() -> bool:
     t_open = pd.Timestamp("2025-01-01", tz="UTC")
     restored = {
         "BTC/USDT:USDT": Position.open(
-            "BTC/USDT:USDT", Direction.LONG, 5, 100.0, 1.0, 98.0, t_open, 0.02,
+            "BTC/USDT:USDT",
+            Direction.LONG,
+            5,
+            100.0,
+            1.0,
+            98.0,
+            t_open,
+            0.02,
         ),
     }
     pb.rehydrate(restored, closed_pnl=-1.5)
@@ -118,7 +121,10 @@ def selftest() -> bool:
     qty, dec = RollManager(cfg).size_add(q, 110.0, 106.0, 50.0, q.margin(), InstrumentSpec("X"))
     if qty:
         q.add_lot(110.0, qty, t0, 0.0, 106.0, 10.0)
-    check("free-roll add allowed and non-losing at stop", dec is AddDecision.ALLOW and q.net_pnl_at(106.0) >= -1e-9)
+    check(
+        "free-roll add allowed and non-losing at stop",
+        dec is AddDecision.ALLOW and q.net_pnl_at(106.0) >= -1e-9,
+    )
 
     # 4) daily halt resets next UTC day; kill switch does not
     r = RiskEngine(Config(max_daily_loss_pct=0.05))
@@ -126,7 +132,10 @@ def selftest() -> bool:
     r.update_equity(46.0, pd.Timestamp("2025-01-01 08:00", tz="UTC"))
     halted = not r.trading_allowed(pd.Timestamp("2025-01-01 09:00", tz="UTC"))
     r.update_equity(46.0, pd.Timestamp("2025-01-02 00:00", tz="UTC"))
-    check("daily halt trips then resets next day", halted and r.trading_allowed(pd.Timestamp("2025-01-02 01:00", tz="UTC")))
+    check(
+        "daily halt trips then resets next day",
+        halted and r.trading_allowed(pd.Timestamp("2025-01-02 01:00", tz="UTC")),
+    )
 
     # 5) R-multiple uses real initial risk, not 2% of equity
     t = Position.open("X", Direction.LONG, 5, 100.0, 2.0, 98.0, t0, 0.0)
@@ -134,28 +143,53 @@ def selftest() -> bool:
     check("R = pnl / (qty * stop distance)", abs(res.r_multiple - 2.0) < 1e-9)
 
     # 5b) time-stop fires when stagnant past N bars without +min_r
-    ts_cfg = Config(enable_time_stop=True, time_stop_bars=3, time_stop_min_r=1.0,
-                    enable_partial=False, enable_pyramiding=False)
-    pos_ts = Position.open("X", Direction.LONG, 5, 100.0, 1.0, 98.0,
-                           pd.Timestamp("2025-01-01 00:00", tz="UTC"), 0.0)
+    ts_cfg = Config(
+        enable_time_stop=True,
+        time_stop_bars=3,
+        time_stop_min_r=1.0,
+        enable_partial=False,
+        enable_pyramiding=False,
+    )
+    pos_ts = Position.open(
+        "X", Direction.LONG, 5, 100.0, 1.0, 98.0, pd.Timestamp("2025-01-01 00:00", tz="UTC"), 0.0
+    )
+
     # fake bar 4h later still flat
     class _B:
         Index = pd.Timestamp("2025-01-01 04:00", tz="UTC")
         close = 100.2
         atr = 1.0
         regime = RegimeState.TRENDING_UP.value
+
     acts = PositionManager(ts_cfg).decide(
-        pos_ts, _B(), allowed=True, kill=False, equity=50.0, used_margin=0.0,
+        pos_ts,
+        _B(),
+        allowed=True,
+        kill=False,
+        equity=50.0,
+        used_margin=0.0,
         spec=InstrumentSpec("X"),
     )
-    check("time stop exits stagnant trade",
-          any(a.kind is ActionKind.EXIT and a.reason is ExitReason.TIME_STOP for a in acts))
+    check(
+        "time stop exits stagnant trade",
+        any(a.kind is ActionKind.EXIT and a.reason is ExitReason.TIME_STOP for a in acts),
+    )
 
     # 6) feature columns for quality filters + momentum + 4H MTF
     demo = build_features(synthetic_ohlcv("BTC/USDT:USDT", 400), cfg)
     for col in (
-        "rsi", "squeeze", "squeeze_ok", "bb_upper", "kc_upper", "btc_trend", "mom_atr",
-        "h4_bias", "h4_adx", "ema_entry", "pullback_long", "pullback_short",
+        "rsi",
+        "squeeze",
+        "squeeze_ok",
+        "bb_upper",
+        "kc_upper",
+        "btc_trend",
+        "mom_atr",
+        "h4_bias",
+        "h4_adx",
+        "ema_entry",
+        "pullback_long",
+        "pullback_short",
     ):
         check(f"feature {col} present", col in demo.columns)
     check("h4_bias has values", demo["h4_bias"].notna().any())
@@ -192,26 +226,68 @@ def selftest() -> bool:
     check("make_strategy momentum_rule", make_strategy(rule_cfg).name == "momentum_rule")
     # score_raw vs capped display
     from types import SimpleNamespace
-    fake_ins = SimpleNamespace(expectancy_r=0.5, trades=80, total_return=1.0, max_drawdown=0.1,
-                               win_rate=0.6, final_equity=100.0, halted="")
-    fake_oos = SimpleNamespace(expectancy_r=0.4, trades=50, total_return=0.5, max_drawdown=0.15,
-                               win_rate=0.55, final_equity=75.0, halted="")
-    g_cap = _grade(fake_ins, fake_oos, fake_oos, wf={"ok": True}, wf_required=True,
-                   fwd={"ok": False}, fwd_required=True)
+
+    fake_ins = SimpleNamespace(
+        expectancy_r=0.5,
+        trades=80,
+        total_return=1.0,
+        max_drawdown=0.1,
+        win_rate=0.6,
+        final_equity=100.0,
+        halted="",
+    )
+    fake_oos = SimpleNamespace(
+        expectancy_r=0.4,
+        trades=50,
+        total_return=0.5,
+        max_drawdown=0.15,
+        win_rate=0.55,
+        final_equity=75.0,
+        halted="",
+    )
+    g_cap = _grade(
+        fake_ins,
+        fake_oos,
+        fake_oos,
+        wf={"ok": True},
+        wf_required=True,
+        fwd={"ok": False},
+        fwd_required=True,
+    )
     check("score_raw present", "score_raw" in g_cap)
-    check("forward cap applies to display only",
-          g_cap["score"] <= FWD_SCORE_CAP and g_cap["score_raw"] >= g_cap["score"])
+    check(
+        "forward cap applies to display only",
+        g_cap["score"] <= FWD_SCORE_CAP and g_cap["score_raw"] >= g_cap["score"],
+    )
     # net directional brake
     rsk = RiskEngine(replace(cfg, max_net_leverage=1.0, max_open_positions=8), silent=True)
     rsk.reset(100.0)
     spec = InstrumentSpec(symbol="X", contract_size=1.0, qty_step=0.01, min_qty=0.01)
     # Net long already at the 1.0x cap → no more longs; shorts still OK
-    d_long = rsk.evaluate(Direction.LONG, 100.0, 98.0, equity=100.0, open_notional=100.0,
-                          used_margin=20.0, open_positions=1, spec=spec,
-                          ts=pd.Timestamp("2025-01-01", tz="UTC"), net_notional=100.0)
-    d_short = rsk.evaluate(Direction.SHORT, 100.0, 102.0, equity=100.0, open_notional=100.0,
-                           used_margin=20.0, open_positions=1, spec=spec,
-                           ts=pd.Timestamp("2025-01-01", tz="UTC"), net_notional=100.0)
+    d_long = rsk.evaluate(
+        Direction.LONG,
+        100.0,
+        98.0,
+        equity=100.0,
+        open_notional=100.0,
+        used_margin=20.0,
+        open_positions=1,
+        spec=spec,
+        ts=pd.Timestamp("2025-01-01", tz="UTC"),
+        net_notional=100.0,
+    )
+    d_short = rsk.evaluate(
+        Direction.SHORT,
+        100.0,
+        102.0,
+        equity=100.0,
+        open_notional=100.0,
+        used_margin=20.0,
+        open_positions=1,
+        spec=spec,
+        ts=pd.Timestamp("2025-01-01", tz="UTC"),
+        net_notional=100.0,
+    )
     check("net-leverage blocks adding with the book", not d_long.approved)
     check("net-leverage still allows opposite side", d_short.approved)
     check(
@@ -220,5 +296,3 @@ def selftest() -> bool:
     )
     print("ALL PASSED" if ok else "SOME TESTS FAILED")
     return ok
-
-

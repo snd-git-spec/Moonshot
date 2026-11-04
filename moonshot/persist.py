@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import math
 import os
-import signal
 import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
@@ -35,7 +22,6 @@ from moonshot.position import (
 if TYPE_CHECKING:
     from moonshot.risk import RiskEngine
 
-from moonshot.paths import ROOT, DB_PATH
 
 class Persistence:
     """SQLite log for paper/live. WAL + named columns so the dashboard can read safely."""
@@ -84,17 +70,33 @@ class Persistence:
                (ts, symbol, direction, entry, exit, qty, pnl, r_multiple, liquidated,
                 exit_reason, adds, fees, funding, entry_time, partial_taken, mode)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (pd.Timestamp(t.exit_time).isoformat(), t.symbol, t.direction.value, t.entry_price,
-             t.exit_price, t.initial_qty, t.pnl, t.r_multiple, int(t.liquidated),
-             t.exit_reason.value, t.max_adds, t.fees, t.funding,
-             pd.Timestamp(t.entry_time).isoformat(), int(t.partial_taken), self.mode))
+            (
+                pd.Timestamp(t.exit_time).isoformat(),
+                t.symbol,
+                t.direction.value,
+                t.entry_price,
+                t.exit_price,
+                t.initial_qty,
+                t.pnl,
+                t.r_multiple,
+                int(t.liquidated),
+                t.exit_reason.value,
+                t.max_adds,
+                t.fees,
+                t.funding,
+                pd.Timestamp(t.entry_time).isoformat(),
+                int(t.partial_taken),
+                self.mode,
+            ),
+        )
         self.conn.commit()
 
     def log_equity(self, ts: datetime, equity: float, peak: float) -> None:
         dd = (peak - equity) / peak if peak > 0 else 0.0
         self.conn.execute(
             "INSERT INTO equity (ts, equity, peak, drawdown, mode) VALUES (?,?,?,?,?)",
-            (pd.Timestamp(ts).isoformat(), equity, peak, dd, self.mode))
+            (pd.Timestamp(ts).isoformat(), equity, peak, dd, self.mode),
+        )
         self.conn.commit()
 
     def log_risk(self, ts: datetime, risk: "RiskEngine") -> None:
@@ -106,23 +108,43 @@ class Persistence:
             """INSERT INTO risk_snapshot
                (ts, mode, equity, peak, drawdown, halt_reason, kill, streak, daily_halt, pause_until)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (pd.Timestamp(ts).isoformat(), self.mode, eq, peak, dd, risk.halt_reason or "",
-             int(risk.kill_switch_active), int(risk.consecutive_losses), int(risk.daily_halt), pause))
+            (
+                pd.Timestamp(ts).isoformat(),
+                self.mode,
+                eq,
+                peak,
+                dd,
+                risk.halt_reason or "",
+                int(risk.kill_switch_active),
+                int(risk.consecutive_losses),
+                int(risk.daily_halt),
+                pause,
+            ),
+        )
         self.conn.commit()
 
-    def log_event(self, ts: datetime, symbol: str, kind: str, payload: Optional[dict] = None) -> None:
+    def log_event(
+        self, ts: datetime, symbol: str, kind: str, payload: Optional[dict] = None
+    ) -> None:
         self.conn.execute(
             "INSERT INTO events (ts, mode, symbol, kind, payload) VALUES (?,?,?,?,?)",
-            (pd.Timestamp(ts).isoformat(), self.mode, symbol, kind,
-             json.dumps(payload or {}, default=str)))
+            (
+                pd.Timestamp(ts).isoformat(),
+                self.mode,
+                symbol,
+                kind,
+                json.dumps(payload or {}, default=str),
+            ),
+        )
         self.conn.commit()
 
     def save_position(self, symbol: str, pos: Optional[Position]) -> None:
         if pos is None:
             self.conn.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
         else:
-            self.conn.execute("INSERT OR REPLACE INTO positions VALUES (?,?)",
-                              (symbol, json.dumps(pos.to_dict())))
+            self.conn.execute(
+                "INSERT OR REPLACE INTO positions VALUES (?,?)", (symbol, json.dumps(pos.to_dict()))
+            )
         self.conn.commit()
 
     def load_positions(self) -> dict:
@@ -191,9 +213,19 @@ class Persistence:
         row = self.conn.execute(q, args).fetchone()
         if not row:
             return None
-        cols = ["ts", "mode", "equity", "peak", "drawdown", "halt_reason", "kill",
-                "streak", "daily_halt", "pause_until"]
-        return dict(zip(cols, row))
+        cols = [
+            "ts",
+            "mode",
+            "equity",
+            "peak",
+            "drawdown",
+            "halt_reason",
+            "kill",
+            "streak",
+            "daily_halt",
+            "pause_until",
+        ]
+        return dict(zip(cols, row, strict=False))
 
     def close(self) -> None:
         self.conn.close()
@@ -219,12 +251,12 @@ class Notifier:
             return
         try:
             import urllib.request
+
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{self.token}/sendMessage",
                 data=json.dumps({"chat_id": self.chat_id, "text": msg}).encode(),
-                headers={"Content-Type": "application/json"})
+                headers={"Content-Type": "application/json"},
+            )
             urllib.request.urlopen(req, timeout=5)
         except Exception as e:  # noqa: BLE001
             log.warning("Notifier failed: %s", e)
-
-

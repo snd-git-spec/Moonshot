@@ -1,22 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
 import time
 import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,17 +14,26 @@ import pandas as pd
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    ActionKind, AddDecision, BotError, Direction, ExecutionError, ExitReason,
+    ActionKind,
+    AddDecision,
+    BotError,
+    Direction,
+    ExecutionError,
+    ExitReason,
     Signal,
 )
 from moonshot.config import (
     Config,
 )
 from moonshot.features import (
-    _btc_symbol_in, _is_btc_symbol, _regime_to_trend, build_features,
+    _btc_symbol_in,
+    _is_btc_symbol,
+    _regime_to_trend,
+    build_features,
 )
 from moonshot.data import (
-    clear_stale_live_caches, fetch_historical,
+    clear_stale_live_caches,
+    fetch_historical,
 )
 from moonshot.strategy import (
     make_strategy,
@@ -51,14 +48,17 @@ from moonshot.portfolio import (
     PositionManager,
 )
 from moonshot.brokers import (
-    BaseBroker, MarketData, PaperBroker,
+    BaseBroker,
+    MarketData,
+    PaperBroker,
 )
 from moonshot.persist import (
     Notifier,
     Persistence,
 )
 
-from moonshot.paths import ROOT, DB_PATH, CACHE_DIR, PAPER_RUNTIME_PATH
+from moonshot.paths import PAPER_RUNTIME_PATH
+import contextlib
 
 
 def _utc_now() -> datetime:
@@ -72,13 +72,21 @@ PEND_ENTRY_MAX_BARS = 2
 def _live_feed(kind: str, message: str, **extra) -> None:
     # Shared feed lives in hunt.constants; lazy import avoids live↔hunt cycle at load.
     from moonshot.hunt.constants import _live_feed as _write_live_feed
+
     _write_live_feed(kind, message, **extra)
 
 
 class LiveRunner:
-    def __init__(self, cfg: Config, broker: BaseBroker, market: MarketData, symbols: list,
-                 live: bool):
-        self.cfg, self.broker, self.market, self.symbols, self.live = cfg, broker, market, symbols, live
+    def __init__(
+        self, cfg: Config, broker: BaseBroker, market: MarketData, symbols: list, live: bool
+    ):
+        self.cfg, self.broker, self.market, self.symbols, self.live = (
+            cfg,
+            broker,
+            market,
+            symbols,
+            live,
+        )
         self.risk = RiskEngine(cfg)
         self.strategy = make_strategy(cfg)
         self.pm = PositionManager(cfg)
@@ -98,6 +106,11 @@ class LiveRunner:
         self._last_funding_key: Optional[pd.Timestamp] = None
         self._bars_seen = 0
         self._signals_seen = 0
+        self._cycle_n = 0
+        self._cycle_id = ""
+        self._last_cycle_ts: Optional[pd.Timestamp] = None
+        # When set, paper/offline replay uses this instead of wall clock.
+        self._clock: Optional[pd.Timestamp] = None
         self._btc_trend = 0.0
         self._raw: dict = {}  # symbol -> OHLCV for prepare_data parity with hunt
         self._book_feats: dict = {}  # symbol -> feature frame from prepare_data
@@ -109,10 +122,14 @@ class LiveRunner:
         if not live and isinstance(broker, PaperBroker):
             closed = self.db.closed_pnl_sum(mode="paper")
             if self.positions or abs(closed) > 1e-12:
-                broker.rehydrate(self.positions or {}, closed)
+                marks = self._peek_runtime_last_marks()
+                broker.rehydrate(self.positions or {}, closed, last_marks=marks)
                 log.info(
-                    "paper rehydrated %d open · closed_pnl=%+.2f · cash=%.2f",
-                    len(self.positions), closed, broker.cash,
+                    "paper rehydrated %d open · closed_pnl=%+.2f · cash=%.2f · stale=%s",
+                    len(self.positions),
+                    closed,
+                    broker.cash,
+                    broker.equity_stale,
                 )
         # Poll BTC first so alt entries see a fresh regime stamp
         if cfg.require_btc_regime:
@@ -125,6 +142,7 @@ class LiveRunner:
         """Pull champion / last-improve soft+week returns for paper drift halt."""
         try:
             from moonshot.hunt.constants import _load_autopilot_state
+
             state = _load_autopilot_state() or {}
             champ = state.get("champion") or {}
             li = state.get("last_improve") or {}
@@ -144,20 +162,34 @@ class LiveRunner:
     def _runtime_path(self) -> Path:
         return Path(self.cfg.db_path).resolve().parent / PAPER_RUNTIME_PATH.name
 
+    def _now(self) -> pd.Timestamp:
+        """Wall clock, or injected `_clock` for offline fixture replay."""
+        if self._clock is not None:
+            return pd.Timestamp(self._clock)
+        return pd.Timestamp.now(tz="UTC")
+
+    def _peek_runtime_last_marks(self) -> dict:
+        """Read last_mark from disk before rehydrate (init order)."""
+        path = self._runtime_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            marks = data.get("last_mark") or {}
+            return {str(k): float(v) for k, v in marks.items()} if isinstance(marks, dict) else {}
+        except Exception:
+            return {}
+
     def _save_runtime(self) -> None:
-        """Persist risk / cooldown / pending queues across paper restarts."""
+        """Persist risk / cooldown / pending queues / marks across paper restarts."""
         if self.live:
             return
         try:
             cool = {
-                s: pd.Timestamp(t).isoformat()
-                for s, t in self.cooldown.items()
-                if t is not None
+                s: pd.Timestamp(t).isoformat() for s, t in self.cooldown.items() if t is not None
             }
             pend_after = {
-                s: pd.Timestamp(t).isoformat()
-                for s, t in self.pend_after.items()
-                if t is not None
+                s: pd.Timestamp(t).isoformat() for s, t in self.pend_after.items() if t is not None
             }
             pend_exit = {
                 s: {
@@ -166,6 +198,11 @@ class LiveRunner:
                 }
                 for s, (r, a) in self.pend_exit.items()
             }
+            last_mark = (
+                self.broker.mark_snapshot()
+                if isinstance(self.broker, PaperBroker)
+                else {s: float(p) for s, p in self.last_price.items()}
+            )
             payload = {
                 "ts": _utc_now().isoformat(),
                 "peak_equity": float(self.risk.peak_equity),
@@ -175,14 +212,27 @@ class LiveRunner:
                 "daily_halt": bool(self.risk.daily_halt),
                 "streak": int(self.risk.consecutive_losses),
                 "pause_until": (
-                    None if self.risk.pause_until is None
+                    None
+                    if self.risk.pause_until is None
                     else pd.Timestamp(self.risk.pause_until).isoformat()
                 ),
+                "circuit_trips": list(getattr(self.risk, "circuit_trips", []) or [])[-10:],
                 "rolling_r": [float(x) for x in list(self.risk.rolling_r)[-50:]],
+                "last_mark": last_mark,
+                "equity_stale": bool(getattr(self.broker, "equity_stale", False))
+                if isinstance(self.broker, PaperBroker)
+                else False,
                 "cooldown": cool,
                 "pend_after": pend_after,
                 "pend_exit": pend_exit,
                 "blocked": sorted(self.blocked),
+                "last_cycle_id": str(self._cycle_id or ""),
+                "last_cycle_ts": (
+                    None
+                    if self._last_cycle_ts is None
+                    else pd.Timestamp(self._last_cycle_ts).isoformat()
+                ),
+                "bars_seen": int(self._bars_seen),
             }
             path = self._runtime_path()
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -210,12 +260,33 @@ class LiveRunner:
             pu = data.get("pause_until")
             if pu:
                 self.risk.pause_until = pd.Timestamp(pu)
+            trips = data.get("circuit_trips") or []
+            if isinstance(trips, list) and trips:
+                self.risk.circuit_trips = [str(x) for x in trips]
+            if data.get("halt_reason") and not self.risk.halt_reason:
+                self.risk.halt_reason = str(data.get("halt_reason"))
             rr = data.get("rolling_r") or []
             if isinstance(rr, list) and rr:
                 self.risk.rolling_r = [float(x) for x in rr]
+            marks = data.get("last_mark") or {}
+            if isinstance(self.broker, PaperBroker) and isinstance(marks, dict):
+                for s, px in marks.items():
+                    self.broker.last[str(s)] = float(px)
+                    self.last_price[str(s)] = float(px)
+                # Rehydrate already set stale if opens exist; keep stale until on_price
+                if self.broker.signed and data.get("equity_stale", True):
+                    self.broker.equity_stale = True
+            cid = data.get("last_cycle_id")
+            if cid:
+                self._cycle_id = str(cid)
+            cts = data.get("last_cycle_ts")
+            if cts:
+                self._last_cycle_ts = pd.Timestamp(cts)
+            if data.get("bars_seen") is not None:
+                self._bars_seen = int(data.get("bars_seen") or 0)
             for s, t in (data.get("cooldown") or {}).items():
                 self.cooldown[str(s)] = pd.Timestamp(t)
-            for s, t in (data.get("pend_after") or {}).items():
+            for s, _t in (data.get("pend_after") or {}).items():
                 # Signals themselves aren't restored — drop stale queue keys
                 self.pend_after.pop(str(s), None)
             for s, blob in (data.get("pend_exit") or {}).items():
@@ -228,8 +299,11 @@ class LiveRunner:
             for s in data.get("blocked") or []:
                 self.blocked.add(str(s))
             log.info(
-                "paper runtime restored (peak=%.2f kill=%s cooldown=%d)",
-                self.risk.peak_equity, self.risk.kill_switch_active, len(self.cooldown),
+                "paper runtime restored (peak=%.2f kill=%s pause=%s cooldown=%d)",
+                self.risk.peak_equity,
+                self.risk.kill_switch_active,
+                self.risk.pause_until,
+                len(self.cooldown),
             )
         except Exception as e:
             log.warning("paper runtime apply failed: %s", e)
@@ -239,7 +313,8 @@ class LiveRunner:
         # Unblock paper if live-sized CSVs froze behind wall clock
         try:
             clear_stale_live_caches(
-                tf=str(self.cfg.timeframe), bars=int(self.cfg.live_history_bars),
+                tf=str(self.cfg.timeframe),
+                bars=int(self.cfg.live_history_bars),
             )
         except Exception as e:
             log.warning("stale cache clear failed: %s", e)
@@ -296,7 +371,7 @@ class LiveRunner:
         if now - self._last_heartbeat < 60:
             return
         self._last_heartbeat = now
-        ts = pd.Timestamp.now(tz="UTC")
+        ts = self._now()
         equity = self.broker.get_equity()
         self.db.log_equity(ts, equity, self.risk.peak_equity)
         self.db.log_risk(ts, self.risk)
@@ -312,21 +387,34 @@ class LiveRunner:
             f"{len(self.symbols)} coins · next candle decision in ~{mins}m · "
             f"bars={self._bars_seen} setups={self._signals_seen}{age_s}"
         )
-        log.info(msg)
-        try:
+        log.info(
+            "%s cycle_id=%s equity=%.4f halt=%s",
+            msg,
+            self._cycle_id or "-",
+            equity,
+            self.risk.halt_reason or "-",
+            extra={
+                "cycle_id": self._cycle_id or "",
+                "equity": float(equity),
+                "halt": str(self.risk.halt_reason or ""),
+            },
+        )
+        with contextlib.suppress(Exception):
             _live_feed(
-                "paper_tick", msg,
-                open=len(self.positions), next_mins=mins,
-                timeframe=self.cfg.timeframe, equity=round(equity, 2),
-                bars_seen=int(self._bars_seen), setups_seen=int(self._signals_seen),
+                "paper_tick",
+                msg,
+                open=len(self.positions),
+                next_mins=mins,
+                timeframe=self.cfg.timeframe,
+                equity=round(equity, 2),
+                bars_seen=int(self._bars_seen),
+                setups_seen=int(self._signals_seen),
                 adx_enter=float(self.cfg.adx_enter),
                 vol_mult=float(self.cfg.volume_multiplier),
                 require_rising_adx=bool(self.cfg.require_rising_adx),
                 leverage=int(self.cfg.leverage),
                 cache_age_sec=None if age is None else round(float(age), 1),
             )
-        except Exception:
-            pass
 
     def _refresh_book_features(self) -> None:
         """Rebuild hunt-parity features (btc_adx / breadth) across the paper book."""
@@ -352,7 +440,8 @@ class LiveRunner:
             else:
                 btc_adx = pd.concat([f["adx"] for f in feats.values()], axis=1).mean(axis=1)
             breadth = pd.concat(
-                [f["h4_bias"].astype(float) for f in feats.values()], axis=1,
+                [f["h4_bias"].astype(float) for f in feats.values()],
+                axis=1,
             ).mean(axis=1)
             for f in feats.values():
                 f["btc_adx"] = btc_adx.reindex(f.index).ffill().fillna(0.0)
@@ -373,14 +462,12 @@ class LiveRunner:
                 pass
         return float(fallback)
 
-    def _bar_aligned_ts(self, sym: str, target: pd.Timestamp,
-                        fallback: Optional[pd.Timestamp] = None) -> pd.Timestamp:
+    def _bar_aligned_ts(
+        self, sym: str, target: pd.Timestamp, fallback: Optional[pd.Timestamp] = None
+    ) -> pd.Timestamp:
         """Snap a timestamp to an OHLCV bar open so charts/DB match candles."""
         ts = pd.Timestamp(target)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        else:
-            ts = ts.tz_convert("UTC")
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
         df = self._raw.get(sym)
         if df is not None and not df.empty:
             idx = df.index
@@ -400,7 +487,7 @@ class LiveRunner:
         self.last_price[sym] = price
         self.broker.on_price(sym, price)
 
-        now = pd.Timestamp.now(tz="UTC")
+        now = self._now()
         self._accrue_funding(now)
         expected = now.floor(self.cfg.pandas_tf) - self.cfg.bar_td  # open of latest closed bar
 
@@ -418,7 +505,9 @@ class LiveRunner:
             if df.empty or df.index[-1] < expected:
                 try:
                     df = fetch_historical(
-                        sym, self.cfg.timeframe, int(self.cfg.live_history_bars),
+                        sym,
+                        self.cfg.timeframe,
+                        int(self.cfg.live_history_bars),
                         refresh=True,
                     )
                 except Exception as e:
@@ -448,7 +537,11 @@ class LiveRunner:
                 else:
                     raw = self._raw.get(sym)
                     # Wait until we have the fill bar (or later) so price+time match candles
-                    if raw is None or raw.empty or pd.Timestamp(raw.index[-1]) < pd.Timestamp(after) - self.cfg.bar_td:
+                    if (
+                        raw is None
+                        or raw.empty
+                        or pd.Timestamp(raw.index[-1]) < pd.Timestamp(after) - self.cfg.bar_td
+                    ):
                         pass  # keep queued; next poll after refresh
                     else:
                         sig = self.pend_entry.pop(sym)
@@ -474,7 +567,11 @@ class LiveRunner:
             reason, after = self.pend_exit[sym]
             if now >= after:
                 raw = self._raw.get(sym)
-                if raw is not None and not raw.empty and pd.Timestamp(raw.index[-1]) >= pd.Timestamp(after) - self.cfg.bar_td:
+                if (
+                    raw is not None
+                    and not raw.empty
+                    and pd.Timestamp(raw.index[-1]) >= pd.Timestamp(after) - self.cfg.bar_td
+                ):
                     self.pend_exit.pop(sym, None)
                     fill_ts = self._bar_aligned_ts(sym, after)
                     fill_px = price
@@ -486,7 +583,9 @@ class LiveRunner:
                     pos = self.positions[sym]
                     self.broker.cancel_stop(sym)
                     side = "sell" if pos.sign > 0 else "buy"
-                    fill = self.broker.market_order(sym, side, pos.current_qty, fill_px, reduce_only=True)
+                    fill = self.broker.market_order(
+                        sym, side, pos.current_qty, fill_px, reduce_only=True
+                    )
                     self._finish(sym, pos, fill.price, fill.fee, fill_ts, reason)
 
         if df is None or df.empty or df.index[-1] < expected:
@@ -498,7 +597,11 @@ class LiveRunner:
                 self._stale_log_at[sym] = tmon
                 log.warning(
                     "%s OHLCV behind closed bar: last=%s expected=%s age=%ss tf=%s",
-                    sym, last, expected, None if age is None else int(age), self.cfg.timeframe,
+                    sym,
+                    last,
+                    expected,
+                    None if age is None else int(age),
+                    self.cfg.timeframe,
                 )
             return
         if self.last_bar.get(sym, pd.Timestamp(0, tz="UTC")) >= expected:
@@ -544,7 +647,9 @@ class LiveRunner:
         return sum(p.margin() for p in self.positions.values())
 
     def _open_notional(self) -> float:
-        return sum(p.current_qty * self.last_price.get(s, p.avg_entry) for s, p in self.positions.items())
+        return sum(
+            p.current_qty * self.last_price.get(s, p.avg_entry) for s, p in self.positions.items()
+        )
 
     def _net_notional(self) -> float:
         return sum(
@@ -572,7 +677,9 @@ class LiveRunner:
             if isinstance(self.broker, PaperBroker):
                 self.broker.cash -= cost
             self.db.save_position(sym, pos)
-            self.db.log_event(ts, sym, "funding", {"cost": cost, "rate": cfg.funding_rate, "price": px})
+            self.db.log_event(
+                ts, sym, "funding", {"cost": cost, "rate": cfg.funding_rate, "price": px}
+            )
 
     def _check_bar_stop_liq(self, sym: str, pos: Position, bar: Any, ts: pd.Timestamp) -> bool:
         """Paper OHLC stop + liquidation (ticker-only stops miss wicks)."""
@@ -613,10 +720,27 @@ class LiveRunner:
 
     def _on_closed_bar(self, sym: str, bar: Any, price: float, ts: pd.Timestamp) -> None:
         # Decisions at bar close; entries/exits fill in _poll once the next bar opens.
+        self._cycle_n += 1
+        self._cycle_id = f"{self._cycle_n}-{uuid.uuid4().hex[:8]}"
+        self._last_cycle_ts = pd.Timestamp(ts)
         equity = self.broker.get_equity()
         self.risk.update_equity(equity, ts)
         self.db.log_equity(ts, equity, self.risk.peak_equity)
         self.db.log_risk(ts, self.risk)
+        log.info(
+            "bar_close symbol=%s cycle_id=%s equity=%.4f halt=%s open=%d",
+            sym,
+            self._cycle_id,
+            equity,
+            self.risk.halt_reason or "-",
+            len(self.positions),
+            extra={
+                "cycle_id": self._cycle_id,
+                "symbol": sym,
+                "equity": float(equity),
+                "halt": str(self.risk.halt_reason or ""),
+            },
+        )
 
         pos = self.positions.get(sym)
         if pos:
@@ -626,9 +750,15 @@ class LiveRunner:
                 return
             if sym in self.pend_exit:
                 return  # already queued for next open
-            acts = self.pm.decide(pos, bar, allowed=self.risk.trading_allowed(ts),
-                                  kill=self.risk.kill_switch_active, equity=equity,
-                                  used_margin=self._used_margin(), spec=self.specs[sym])
+            acts = self.pm.decide(
+                pos,
+                bar,
+                allowed=self.risk.trading_allowed(ts),
+                kill=self.risk.kill_switch_active,
+                equity=equity,
+                used_margin=self._used_margin(),
+                spec=self.specs[sym],
+            )
             # Queue EXIT for next open (match backtest); other acts still immediate
             exit_acts = [a for a in acts if a.kind is ActionKind.EXIT]
             other = [a for a in acts if a.kind is not ActionKind.EXIT]
@@ -646,10 +776,13 @@ class LiveRunner:
         cfg = self.cfg
         if ts < self.cooldown.get(sym, ts) or not self.risk.trading_allowed(ts):
             return
+        # After restart, marks may be stale — no new risk until first on_price.
+        if isinstance(self.broker, PaperBroker) and self.broker.equity_stale:
+            return
         if len(self.positions) + len(self.pend_entry) >= cfg.max_open_positions:
             return
         # Refuse setups on a stale book — fills against old opens then die as regime_invalid
-        now = pd.Timestamp.now(tz="UTC")
+        now = self._now()
         expected = now.floor(cfg.pandas_tf) - cfg.bar_td
         raw = self._raw.get(sym)
         if raw is None or raw.empty or pd.Timestamp(raw.index[-1]) < expected - cfg.bar_td:
@@ -660,72 +793,109 @@ class LiveRunner:
         self._signals_seen += 1
         self.pend_entry[sym] = sig
         self.pend_after[sym] = pd.Timestamp(ts)  # earliest fill = open of the new bar
-        log.info("%s SETUP %s — queued for next open (%s)", sym, sig.direction.value, sig.reason)
-        try:
+        log.info(
+            "%s SETUP %s — queued for next open (%s) cycle_id=%s",
+            sym,
+            sig.direction.value,
+            sig.reason,
+            self._cycle_id or "-",
+            extra={"cycle_id": self._cycle_id or "", "symbol": sym},
+        )
+        with contextlib.suppress(Exception):
             _live_feed(
                 "setup",
                 f"{sym.split('/')[0]} {sig.direction.value} setup — queued for next candle open",
-                symbol=sym, direction=sig.direction.value, reason=sig.reason,
+                symbol=sym,
+                direction=sig.direction.value,
+                reason=sig.reason,
             )
-        except Exception:
-            pass
 
-    def _open_from_signal(self, sym: str, sig: Signal, price: float, ts: pd.Timestamp,
-                          equity: float) -> None:
+    def _open_from_signal(
+        self, sym: str, sig: Signal, price: float, ts: pd.Timestamp, equity: float
+    ) -> None:
         cfg = self.cfg
         if sym in self.positions or not self.risk.trading_allowed(ts):
             return
+        if isinstance(self.broker, PaperBroker) and self.broker.equity_stale:
+            return
         stop = price - sig.direction.sign * cfg.initial_stop_atr * sig.atr
         dec = self.risk.evaluate(
-            sig.direction, price, stop, equity=equity,
-            open_notional=self._open_notional(), used_margin=self._used_margin(),
-            open_positions=len(self.positions), spec=self.specs[sym], ts=ts,
+            sig.direction,
+            price,
+            stop,
+            equity=equity,
+            open_notional=self._open_notional(),
+            used_margin=self._used_margin(),
+            open_positions=len(self.positions),
+            spec=self.specs[sym],
+            ts=ts,
             net_notional=self._net_notional(),
         )
         if not dec.approved:
             log.info("%s queued signal rejected at open: %s", sym, dec.reason)
-            try:
-                _live_feed("reject", f"{sym.split('/')[0]} blocked at open: {dec.reason}",
-                           symbol=sym, reason=dec.reason)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                _live_feed(
+                    "reject",
+                    f"{sym.split('/')[0]} blocked at open: {dec.reason}",
+                    symbol=sym,
+                    reason=dec.reason,
+                )
             return
         side = "buy" if sig.direction is Direction.LONG else "sell"
         self.broker.set_leverage(sym, dec.leverage)
         fill = self.broker.market_order(sym, side, dec.qty, price)
         stop = fill.price - sig.direction.sign * cfg.initial_stop_atr * sig.atr
-        pos = Position.open(sym, sig.direction, dec.leverage, fill.price, fill.qty, stop, ts, fill.fee)
+        pos = Position.open(
+            sym, sig.direction, dec.leverage, fill.price, fill.qty, stop, ts, fill.fee
+        )
         try:
             self.broker.set_stop(sym, pos.direction, pos.current_qty, pos.current_stop)
         except ExecutionError:
-            self.broker.market_order(sym, "sell" if side == "buy" else "buy", fill.qty, price, reduce_only=True)
+            self.broker.market_order(
+                sym, "sell" if side == "buy" else "buy", fill.qty, price, reduce_only=True
+            )
             self.blocked.add(sym)
             raise
         self.positions[sym] = pos
         self.db.save_position(sym, pos)
-        self.db.log_event(ts, sym, "open", {
-            "direction": sig.direction.value, "qty": fill.qty, "price": fill.price,
-            "stop": stop, "reason": sig.reason, "fill_timing": "next_open",
-        })
-        try:
+        self.db.log_event(
+            ts,
+            sym,
+            "open",
+            {
+                "direction": sig.direction.value,
+                "qty": fill.qty,
+                "price": fill.price,
+                "stop": stop,
+                "reason": sig.reason,
+                "fill_timing": "next_open",
+            },
+        )
+        with contextlib.suppress(Exception):
             _live_feed(
                 "open",
                 f"OPEN {sym.split('/')[0]} {sig.direction.value} @ {fill.price:.6g}",
-                symbol=sym, direction=sig.direction.value, price=fill.price, qty=fill.qty,
+                symbol=sym,
+                direction=sig.direction.value,
+                price=fill.price,
+                qty=fill.qty,
             )
-        except Exception:
-            pass
-        self.notify.send(f"OPEN {sym} {sig.direction.value} qty={fill.qty:.6g} @ {fill.price:.6g} "
-                         f"stop={stop:.6g} | {sig.reason}")
+        self.notify.send(
+            f"OPEN {sym} {sig.direction.value} qty={fill.qty:.6g} @ {fill.price:.6g} "
+            f"stop={stop:.6g} | {sig.reason}"
+        )
 
-    def _execute(self, sym: str, pos: Position, acts: list, price: float, ts: pd.Timestamp,
-                 equity: float) -> None:
+    def _execute(
+        self, sym: str, pos: Position, acts: list, price: float, ts: pd.Timestamp, equity: float
+    ) -> None:
         close_side = "sell" if pos.sign > 0 else "buy"
         open_side = "buy" if pos.sign > 0 else "sell"
         for a in acts:
             if a.kind is ActionKind.EXIT:
                 self.broker.cancel_stop(sym)
-                fill = self.broker.market_order(sym, close_side, pos.current_qty, price, reduce_only=True)
+                fill = self.broker.market_order(
+                    sym, close_side, pos.current_qty, price, reduce_only=True
+                )
                 self._finish(sym, pos, fill.price, fill.fee, ts, a.reason)
                 return
         for a in acts:
@@ -733,20 +903,39 @@ class LiveRunner:
                 fill = self.broker.market_order(sym, close_side, a.qty, price, reduce_only=True)
                 pos.reduce(fill.price, fill.qty, fill.fee)
                 pos.partial_done = True
-                self.db.log_event(ts, sym, "partial", {
-                    "qty": fill.qty, "price": fill.price, "remaining": pos.current_qty,
-                })
+                self.db.log_event(
+                    ts,
+                    sym,
+                    "partial",
+                    {
+                        "qty": fill.qty,
+                        "price": fill.price,
+                        "remaining": pos.current_qty,
+                    },
+                )
             elif a.kind is ActionKind.ADD:
-                qty, dec = self.pm.roll.size_add(pos, price, a.price, equity, self._used_margin(),
-                                                 self.specs[sym])
+                qty, dec = self.pm.roll.size_add(
+                    pos, price, a.price, equity, self._used_margin(), self.specs[sym]
+                )
                 if dec is AddDecision.ALLOW and qty:
                     fill = self.broker.market_order(sym, open_side, qty, price)
-                    pos.add_lot(fill.price, fill.qty, ts, fill.fee, a.price, pos.unrealized(fill.price))
-                    self.db.log_event(ts, sym, "add", {
-                        "qty": fill.qty, "price": fill.price, "avg": pos.avg_entry,
-                        "stop": pos.current_stop,
-                    })
-                    self.notify.send(f"ADD {sym} +{fill.qty:.6g} @ {fill.price:.6g} avg={pos.avg_entry:.6g}")
+                    pos.add_lot(
+                        fill.price, fill.qty, ts, fill.fee, a.price, pos.unrealized(fill.price)
+                    )
+                    self.db.log_event(
+                        ts,
+                        sym,
+                        "add",
+                        {
+                            "qty": fill.qty,
+                            "price": fill.price,
+                            "avg": pos.avg_entry,
+                            "stop": pos.current_stop,
+                        },
+                    )
+                    self.notify.send(
+                        f"ADD {sym} +{fill.qty:.6g} @ {fill.price:.6g} avg={pos.avg_entry:.6g}"
+                    )
             elif a.kind is ActionKind.MOVE_STOP:
                 old = pos.current_stop
                 if pos.tighten_stop(a.price):
@@ -777,11 +966,13 @@ class LiveRunner:
                 return
             px = fill.price if fill else pos.current_stop
             fee = fill.fee if fill else px * pos.current_qty * self.cfg.fee_taker
-            reason = ExitReason.TRAILING if pos.current_stop != pos.initial_stop else ExitReason.STOP
+            reason = (
+                ExitReason.TRAILING if pos.current_stop != pos.initial_stop else ExitReason.STOP
+            )
             # Stamp exit on the last closed candle — wall clock piled markers on chart edge
             exit_ts = self._bar_aligned_ts(
                 sym,
-                self.last_bar.get(sym) or pd.Timestamp.now(tz="UTC"),
+                self.last_bar.get(sym) or self._now(),
             )
             self._finish(sym, pos, px, fee, exit_ts, reason)
         elif bp and not pos and sym not in self.blocked:
@@ -790,12 +981,17 @@ class LiveRunner:
         elif bp and pos:
             self._seen_broker_pos.add(sym)
             if abs(bp.qty - pos.current_qty) > 0.01 * pos.current_qty:
-                log.warning("%s qty mismatch local=%.6g broker=%.6g; syncing to broker", sym,
-                            pos.current_qty, bp.qty)
+                log.warning(
+                    "%s qty mismatch local=%.6g broker=%.6g; syncing to broker",
+                    sym,
+                    pos.current_qty,
+                    bp.qty,
+                )
                 pos.current_qty = bp.qty
 
-    def _finish(self, sym: str, pos: Position, px: float, fee: float, ts: pd.Timestamp,
-                reason: ExitReason) -> None:
+    def _finish(
+        self, sym: str, pos: Position, px: float, fee: float, ts: pd.Timestamp, reason: ExitReason
+    ) -> None:
         # Never stamp exit before entry (chart / hold-time integrity)
         try:
             et = pd.Timestamp(pos.entry_time)
@@ -813,9 +1009,17 @@ class LiveRunner:
         self.pend_exit.pop(sym, None)
         self.db.save_position(sym, None)
         self.db.log_trade(res)
-        self.db.log_event(ts, sym, "exit", {
-            "reason": reason.value, "pnl": res.pnl, "r": res.r_multiple, "price": px,
-        })
+        self.db.log_event(
+            ts,
+            sym,
+            "exit",
+            {
+                "reason": reason.value,
+                "pnl": res.pnl,
+                "r": res.r_multiple,
+                "price": px,
+            },
+        )
         self.risk.register_trade_result(res.r_multiple, ts)
         # Paper drift vs promoted backtest band — halt new entries if far outside.
         if not self.live and self.risk.rolling_r:
@@ -824,30 +1028,118 @@ class LiveRunner:
             start_eq = float(self.cfg.starting_equity) or 1.0
             paper_ret = (float(self.risk.equity) / start_eq) - 1.0
             if self.risk.check_paper_drift(
-                n_trades=n, paper_exp=paper_exp, paper_ret=paper_ret,
+                n_trades=n,
+                paper_exp=paper_exp,
+                paper_ret=paper_ret,
             ):
-                try:
+                with contextlib.suppress(Exception):
                     _live_feed(
                         "drift_halt",
                         f"PAPER DRIFT HALT · {self.risk.halt_reason}",
-                        exp=paper_exp, ret=paper_ret, n=n,
+                        exp=paper_exp,
+                        ret=paper_ret,
+                        n=n,
                     )
-                except Exception:
-                    pass
         # Longer cool-off after regime kills — stops open→kill→requeue loops
         cool_bars = int(self.cfg.cooldown_bars)
         if reason is ExitReason.REGIME_INVALID:
             cool_bars = max(cool_bars, 6)
         self.cooldown[sym] = ts + cool_bars * self.cfg.bar_td
         self._save_runtime()
-        try:
+        with contextlib.suppress(Exception):
             _live_feed(
                 "close",
                 f"CLOSE {sym.split('/')[0]} {reason.value} pnl={res.pnl:+.2f}",
-                symbol=sym, reason=reason.value, pnl=res.pnl, r=res.r_multiple,
+                symbol=sym,
+                reason=reason.value,
+                pnl=res.pnl,
+                r=res.r_multiple,
             )
-        except Exception:
-            pass
         self.notify.send(f"CLOSE {sym} {reason.value} pnl={res.pnl:+.2f} ({res.r_multiple:+.2f}R)")
 
-
+    def replay_offline(
+        self,
+        frames: dict[str, pd.DataFrame],
+        *,
+        start_i: int = 0,
+        end_i: Optional[int] = None,
+    ) -> None:
+        """Drive paper decisions from frozen OHLCV (tests / smoke). Uses `_clock`."""
+        if self.live:
+            raise BotError("replay_offline is paper-only")
+        if not frames:
+            return
+        # Align on shared timestamps (fixture books share an index)
+        idx = None
+        for df in frames.values():
+            idx = df.index if idx is None else idx.intersection(df.index)
+        if idx is None or len(idx) == 0:
+            return
+        idx = pd.DatetimeIndex(idx).sort_values()
+        end = len(idx) if end_i is None else min(int(end_i), len(idx))
+        start = max(0, int(start_i))
+        for i in range(start, end):
+            bar_ts = pd.Timestamp(idx[i])
+            # Decision clock = open of the next bar (same as live closed-bar ts)
+            self._clock = bar_ts + self.cfg.bar_td
+            for sym in self.symbols:
+                full = frames.get(sym)
+                if full is None or full.empty:
+                    continue
+                df = full.loc[:bar_ts]
+                if df.empty:
+                    continue
+                self._raw[sym] = df
+                price = float(df.iloc[-1]["close"])
+                self.last_price[sym] = price
+                self.broker.on_price(sym, price)
+                # Pick up exchange-side stop fills before discretionary bar logic
+                self._reconcile(sym)
+                # Pending fills at this open (mirror _poll fill branch)
+                if sym in self.pend_entry and sym not in self.positions:
+                    after = self.pend_after.get(sym)
+                    if after is not None and self._clock >= after:
+                        sig = self.pend_entry.pop(sym)
+                        self.pend_after.pop(sym, None)
+                        fill_ts = pd.Timestamp(after)
+                        fill_px = price
+                        try:
+                            if fill_ts in df.index:
+                                fill_px = float(df.loc[fill_ts, "open"])
+                            elif bar_ts in df.index:
+                                fill_px = float(df.loc[bar_ts, "open"])
+                        except Exception:
+                            pass
+                        self._open_from_signal(sym, sig, fill_px, fill_ts, self.broker.get_equity())
+                if sym in self.pend_exit and sym in self.positions:
+                    reason, after = self.pend_exit[sym]
+                    if self._clock >= after:
+                        self.pend_exit.pop(sym, None)
+                        fill_ts = pd.Timestamp(after)
+                        fill_px = price
+                        try:
+                            if fill_ts in df.index:
+                                fill_px = float(df.loc[fill_ts, "open"])
+                        except Exception:
+                            pass
+                        pos = self.positions[sym]
+                        self.broker.cancel_stop(sym)
+                        side = "sell" if pos.sign > 0 else "buy"
+                        fill = self.broker.market_order(
+                            sym, side, pos.current_qty, fill_px, reduce_only=True
+                        )
+                        self._finish(sym, pos, fill.price, fill.fee, fill_ts, reason)
+                if self.last_bar.get(sym, pd.Timestamp(0, tz="UTC")) >= bar_ts:
+                    continue
+                self.last_bar[sym] = bar_ts
+                self._bars_seen += 1
+                self._refresh_book_features()
+                if sym in self._book_feats and not self._book_feats[sym].empty:
+                    feats = self._book_feats[sym]
+                else:
+                    feats = build_features(df, self.cfg)
+                if feats.empty:
+                    continue
+                bar = next(feats.tail(1).itertuples(name="Bar"))
+                self._on_closed_bar(sym, bar, price, bar_ts + self.cfg.bar_td)
+            self._save_runtime()

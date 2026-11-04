@@ -1,24 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
 import logging
-import math
-import os
-import signal
 import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import replace
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -29,7 +15,7 @@ from moonshot.config import (
     Config,
 )
 from moonshot.features import (
-    adx, prepare_data,
+    prepare_data,
 )
 from moonshot.backtest import (
     BacktestEngine,
@@ -48,9 +34,10 @@ from moonshot.hunt.constants import (
 )
 
 from moonshot.paths import (
-    ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
-    PAPER_RUNTIME_PATH, RULES_PATH,
+    DB_PATH,
+    RULES_PATH,
 )
+
 
 def _soft_kill_cfg(cfg: Config) -> Config:
     """Kills effectively off — used to detect kill-switch-only 'wins'."""
@@ -68,7 +55,11 @@ def _freeze_risk(base: Config, c: Config) -> Config:
     aggressive = bool(getattr(base, "aggressive_mode", False))
     # Strategy + TF may change in explore/breakout (Layer 4 / 4c)
     strat = str(getattr(c, "strategy", base.strategy) or base.strategy).strip().lower()
-    if strat not in HUNT_STRATEGIES and strat not in ("momentum_rule", "combo_and", "regime_breakout"):
+    if strat not in HUNT_STRATEGIES and strat not in (
+        "momentum_rule",
+        "combo_and",
+        "regime_breakout",
+    ):
         strat = (base.strategy or "trend_mtf").strip().lower()
     tf = str(getattr(c, "timeframe", base.timeframe) or base.timeframe).strip().lower()
     if tf not in HUNT_TF_ALLOW:
@@ -94,15 +85,24 @@ def _freeze_risk(base: Config, c: Config) -> Config:
         else:
             risk_hi, open_hi, stop_lo = 0.05, 8, 1.5
         risk = float(max(0.015, min(risk_hi, c.risk_pct)))
-        max_open = int(max(1, min(open_hi, int(
-            getattr(c, "max_open_positions", getattr(base, "max_open_positions", 4)) or 4
-        ))))
-        max_acct = float(max(lev, min(25.0, float(
-            getattr(c, "max_account_leverage", float(lev)) or lev
-        ))))
-        max_net = float(max(lev, min(25.0, float(
-            getattr(c, "max_net_leverage", float(lev)) or lev
-        ))))
+        max_open = int(
+            max(
+                1,
+                min(
+                    open_hi,
+                    int(
+                        getattr(c, "max_open_positions", getattr(base, "max_open_positions", 4))
+                        or 4
+                    ),
+                ),
+            )
+        )
+        max_acct = float(
+            max(lev, min(25.0, float(getattr(c, "max_account_leverage", float(lev)) or lev)))
+        )
+        max_net = float(
+            max(lev, min(25.0, float(getattr(c, "max_net_leverage", float(lev)) or lev)))
+        )
         stop_atr = float(max(stop_lo, min(4.0, c.initial_stop_atr)))
     else:
         lev = int(base.leverage)
@@ -131,10 +131,36 @@ def _freeze_risk(base: Config, c: Config) -> Config:
         streak_hrs = float(getattr(c, "streak_pause_hours", base.streak_pause_hours))
     daily = float(max(daily_lo, min(daily_hi, max(c.max_daily_loss_pct, risk * 3))))
     peak_dd = float(max(dd_lo, min(dd_hi, c.max_peak_drawdown_pct)))
-    h4_fast = int(max(8, min(50, int(getattr(c, "h4_ema_fast", base.h4_ema_fast) or base.h4_ema_fast))))
-    h4_slow = int(max(h4_fast + 5, min(100, int(getattr(c, "h4_ema_slow", base.h4_ema_slow) or base.h4_ema_slow))))
-    ema_entry = int(max(8, min(50, int(getattr(c, "ema_entry_period", base.ema_entry_period) or base.ema_entry_period))))
-    pullback_lb = int(max(2, min(12, int(getattr(c, "pullback_lookback", base.pullback_lookback) or base.pullback_lookback))))
+    h4_fast = int(
+        max(8, min(50, int(getattr(c, "h4_ema_fast", base.h4_ema_fast) or base.h4_ema_fast)))
+    )
+    h4_slow = int(
+        max(
+            h4_fast + 5,
+            min(100, int(getattr(c, "h4_ema_slow", base.h4_ema_slow) or base.h4_ema_slow)),
+        )
+    )
+    ema_entry = int(
+        max(
+            8,
+            min(
+                50,
+                int(getattr(c, "ema_entry_period", base.ema_entry_period) or base.ema_entry_period),
+            ),
+        )
+    )
+    pullback_lb = int(
+        max(
+            2,
+            min(
+                12,
+                int(
+                    getattr(c, "pullback_lookback", base.pullback_lookback)
+                    or base.pullback_lookback
+                ),
+            ),
+        )
+    )
     btc_adx = float(max(0.0, min(30.0, float(getattr(c, "btc_adx_min", 0.0) or 0.0))))
     breadth = float(max(0.0, min(0.8, float(getattr(c, "breadth_min", 0.0) or 0.0))))
     # Cap ADX/vol so hunt cannot "improve" into a silent zero-setup book.
@@ -229,10 +255,7 @@ def _paper_idle_hours() -> float:
         if not row or not row[0]:
             return 999.0
         last = pd.Timestamp(row[0])
-        if last.tzinfo is None:
-            last = last.tz_localize("UTC")
-        else:
-            last = last.tz_convert("UTC")
+        last = last.tz_localize("UTC") if last.tzinfo is None else last.tz_convert("UTC")
         return float((pd.Timestamp.now(tz="UTC") - last).total_seconds() / 3600.0)
     except Exception:
         return 0.0
@@ -241,19 +264,32 @@ def _paper_idle_hours() -> float:
 def _cfg_fingerprint(cfg: Config) -> tuple:
     """Stable identity of tradable knobs — used to skip no-op promotes."""
     return (
-        str(cfg.strategy), str(cfg.timeframe), int(cfg.leverage),
-        round(float(cfg.adx_enter), 3), round(float(cfg.adx_exit), 3),
+        str(cfg.strategy),
+        str(cfg.timeframe),
+        int(cfg.leverage),
+        round(float(cfg.adx_enter), 3),
+        round(float(cfg.adx_exit), 3),
         round(float(cfg.volume_multiplier), 3),
-        round(float(cfg.breakout_buffer_atr), 3), int(cfg.breakout_lookback),
-        round(float(cfg.trail_atr_multiple), 3), round(float(cfg.trail_atr_loser), 3),
-        round(float(cfg.initial_stop_atr), 3), int(cfg.cooldown_bars),
-        bool(cfg.require_rising_adx), bool(cfg.require_squeeze),
-        bool(cfg.require_rsi_veto), bool(cfg.require_btc_regime),
-        bool(cfg.use_asymmetric_trail), bool(cfg.enable_partial),
-        bool(cfg.enable_time_stop), int(cfg.time_stop_bars),
-        int(cfg.mom_lookback), round(float(cfg.mom_min_atr), 3),
-        int(cfg.h4_ema_fast), int(cfg.h4_ema_slow),
-        round(float(cfg.btc_adx_min), 3), round(float(cfg.breadth_min), 3),
+        round(float(cfg.breakout_buffer_atr), 3),
+        int(cfg.breakout_lookback),
+        round(float(cfg.trail_atr_multiple), 3),
+        round(float(cfg.trail_atr_loser), 3),
+        round(float(cfg.initial_stop_atr), 3),
+        int(cfg.cooldown_bars),
+        bool(cfg.require_rising_adx),
+        bool(cfg.require_squeeze),
+        bool(cfg.require_rsi_veto),
+        bool(cfg.require_btc_regime),
+        bool(cfg.use_asymmetric_trail),
+        bool(cfg.enable_partial),
+        bool(cfg.enable_time_stop),
+        int(cfg.time_stop_bars),
+        int(cfg.mom_lookback),
+        round(float(cfg.mom_min_atr), 3),
+        int(cfg.h4_ema_fast),
+        int(cfg.h4_ema_slow),
+        round(float(cfg.btc_adx_min), 3),
+        round(float(cfg.breadth_min), 3),
     )
 
 
@@ -285,11 +321,16 @@ def _champion_from_history(hist_rows: list, current: dict | None) -> dict | None
 
 def _material_research_edge(
     *,
-    best_cfg: Config, base_cfg: Config,
-    best_grade: dict, base_grade: dict,
-    best_week: dict, base_week: dict,
-    best_o: BacktestResult, base_o: BacktestResult,
-    best_soft: Optional[BacktestResult], base_soft: Optional[BacktestResult],
+    best_cfg: Config,
+    base_cfg: Config,
+    best_grade: dict,
+    base_grade: dict,
+    best_week: dict,
+    base_week: dict,
+    best_o: BacktestResult,
+    base_o: BacktestResult,
+    best_soft: Optional[BacktestResult],
+    base_soft: Optional[BacktestResult],
 ) -> tuple[bool, str]:
     """True only when the candidate is a real step up — not ±1% thrash.
 
@@ -306,8 +347,7 @@ def _material_research_edge(
     week_edge = best_w >= base_w + RESEARCH_MIN_WEEK_EDGE
     score_edge = (
         int(best_grade.get("score_raw", best_grade.get("score", 0)))
-        >= int(base_grade.get("score_raw", base_grade.get("score", 0)))
-        + RESEARCH_MIN_SCORE_EDGE
+        >= int(base_grade.get("score_raw", base_grade.get("score", 0))) + RESEARCH_MIN_SCORE_EDGE
     )
     oos_edge = float(best_o.total_return) >= float(base_o.total_return) + RESEARCH_MIN_OOS_RET_EDGE
     soft_edge = False
@@ -348,19 +388,43 @@ def _dedupe_cfgs(base: Config, seeds: list) -> list:
     for c in seeds:
         c = _freeze_risk(base, c)
         key = (
-            c.strategy, c.timeframe, c.adx_enter, c.adx_exit, c.volume_multiplier,
-            c.breakout_buffer_atr, c.breakout_lookback, c.trail_atr_multiple,
-            c.trail_atr_loser, round(c.initial_stop_atr, 2), c.cooldown_bars,
-            c.require_rising_adx, c.require_squeeze, c.require_rsi_veto, c.require_btc_regime,
-            c.use_asymmetric_trail, round(c.h4_adx_min_short, 1),
-            c.rsi_long_max, c.rsi_short_min, c.squeeze_lookback,
-            c.enable_partial, c.partial_at_r, c.partial_pct,
-            c.enable_time_stop, c.time_stop_bars,
-            round(c.risk_pct, 3), round(c.initial_margin_pct, 3),
-            int(c.mom_lookback), round(c.mom_min_atr, 3),
-            int(c.leverage), int(c.max_open_positions), round(float(c.max_net_leverage), 2),
-            int(c.h4_ema_fast), int(c.h4_ema_slow), int(c.ema_entry_period),
-            int(c.pullback_lookback), round(float(c.btc_adx_min), 1),
+            c.strategy,
+            c.timeframe,
+            c.adx_enter,
+            c.adx_exit,
+            c.volume_multiplier,
+            c.breakout_buffer_atr,
+            c.breakout_lookback,
+            c.trail_atr_multiple,
+            c.trail_atr_loser,
+            round(c.initial_stop_atr, 2),
+            c.cooldown_bars,
+            c.require_rising_adx,
+            c.require_squeeze,
+            c.require_rsi_veto,
+            c.require_btc_regime,
+            c.use_asymmetric_trail,
+            round(c.h4_adx_min_short, 1),
+            c.rsi_long_max,
+            c.rsi_short_min,
+            c.squeeze_lookback,
+            c.enable_partial,
+            c.partial_at_r,
+            c.partial_pct,
+            c.enable_time_stop,
+            c.time_stop_bars,
+            round(c.risk_pct, 3),
+            round(c.initial_margin_pct, 3),
+            int(c.mom_lookback),
+            round(c.mom_min_atr, 3),
+            int(c.leverage),
+            int(c.max_open_positions),
+            round(float(c.max_net_leverage), 2),
+            int(c.h4_ema_fast),
+            int(c.h4_ema_slow),
+            int(c.ema_entry_period),
+            int(c.pullback_lookback),
+            round(float(c.btc_adx_min), 1),
             round(float(c.breadth_min), 2),
         )
         if key in seen:
@@ -377,23 +441,35 @@ def _polish_cfgs(base: Config) -> list:
         adx = max(14.0, min(40.0, base.adx_enter + d))
         seeds.append(replace(base, adx_enter=adx, adx_exit=max(10.0, adx - 6.0)))
     for d in (-0.3, -0.2, -0.1, 0.1, 0.2, 0.3):
-        seeds.append(replace(
-            base, volume_multiplier=max(1.1, min(3.0, round(base.volume_multiplier + d, 1))),
-        ))
+        seeds.append(
+            replace(
+                base,
+                volume_multiplier=max(1.1, min(3.0, round(base.volume_multiplier + d, 1))),
+            )
+        )
     for d in (-3, -2, -1, 1, 2, 3):
         seeds.append(replace(base, mom_lookback=max(3, min(24, int(base.mom_lookback + d)))))
     for d in (-0.3, -0.2, -0.1, 0.1, 0.2, 0.3):
-        seeds.append(replace(
-            base, mom_min_atr=max(0.25, min(2.0, round(base.mom_min_atr + d, 2))),
-        ))
+        seeds.append(
+            replace(
+                base,
+                mom_min_atr=max(0.25, min(2.0, round(base.mom_min_atr + d, 2))),
+            )
+        )
     for d in (-0.75, -0.5, -0.25, 0.25, 0.5, 0.75):
-        seeds.append(replace(
-            base, trail_atr_multiple=max(1.25, min(4.0, round(base.trail_atr_multiple + d, 2))),
-        ))
+        seeds.append(
+            replace(
+                base,
+                trail_atr_multiple=max(1.25, min(4.0, round(base.trail_atr_multiple + d, 2))),
+            )
+        )
     for d in (-0.75, -0.5, -0.25, 0.25, 0.5, 0.75):
-        seeds.append(replace(
-            base, initial_stop_atr=max(1.5, min(4.0, round(base.initial_stop_atr + d, 2))),
-        ))
+        seeds.append(
+            replace(
+                base,
+                initial_stop_atr=max(1.5, min(4.0, round(base.initial_stop_atr + d, 2))),
+            )
+        )
     for d in (-6, -4, -2, 2, 4, 6):
         seeds.append(replace(base, time_stop_bars=max(4, min(48, int(base.time_stop_bars + d)))))
     for d in (-2, -1, 1, 2, 3):
@@ -402,7 +478,9 @@ def _polish_cfgs(base: Config) -> list:
         rp = max(0.02, min(0.05, round(base.risk_pct + d, 3)))
         seeds.append(replace(base, risk_pct=rp, initial_margin_pct=max(0.16, min(0.80, rp * 8))))
     for d in (-0.5, -0.25, 0.25, 0.5):
-        seeds.append(replace(base, partial_at_r=max(0.5, min(3.0, round(base.partial_at_r + d, 2)))))
+        seeds.append(
+            replace(base, partial_at_r=max(0.5, min(3.0, round(base.partial_at_r + d, 2))))
+        )
     # Filter flips — often the only way out of a stuck peak
     seeds.append(replace(base, require_btc_regime=not bool(base.require_btc_regime)))
     seeds.append(replace(base, require_rising_adx=not bool(base.require_rising_adx)))
@@ -417,11 +495,15 @@ def _polish_cfgs(base: Config) -> list:
                 tf = "5m" if str(base.timeframe) == "15m" else base.timeframe
             elif lev >= 10 and str(base.timeframe) == "15m":
                 tf = base.timeframe  # 10x may stay 15m; breakout samples 5m
-            seeds.append(replace(
-                base, leverage=lev, timeframe=str(tf),
-                max_account_leverage=float(max(lev, float(base.max_account_leverage))),
-                max_net_leverage=float(max(lev, float(base.max_net_leverage))),
-            ))
+            seeds.append(
+                replace(
+                    base,
+                    leverage=lev,
+                    timeframe=str(tf),
+                    max_account_leverage=float(max(lev, float(base.max_account_leverage))),
+                    max_net_leverage=float(max(lev, float(base.max_net_leverage))),
+                )
+            )
         for n_open in (2, 3, 4, 5, 6):
             if n_open != int(base.max_open_positions):
                 seeds.append(replace(base, max_open_positions=n_open))
@@ -437,11 +519,13 @@ def _polish_cfgs(base: Config) -> list:
             seeds.append(replace(base, breadth_min=br))
     for lb in (-2, -1, 1, 2):
         for thr in (-0.15, -0.1, 0.1, 0.15):
-            seeds.append(replace(
-                base,
-                mom_lookback=max(3, min(24, int(base.mom_lookback + lb))),
-                mom_min_atr=max(0.25, min(2.0, round(base.mom_min_atr + thr, 2))),
-            ))
+            seeds.append(
+                replace(
+                    base,
+                    mom_lookback=max(3, min(24, int(base.mom_lookback + lb))),
+                    mom_min_atr=max(0.25, min(2.0, round(base.mom_min_atr + thr, 2))),
+                )
+            )
     return seeds
 
 
@@ -464,11 +548,18 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     bo_buf_opts = [0.0, 0.1, 0.2, 0.35, 0.5] if wide else [0.0, 0.15, 0.3]
     loser_opts = [1.25, 1.5, 2.0, 2.5, 3.0]
     h4_adx_opts = [10.0, 12.0, 15.0, 18.0, 20.0, 22.0, 25.0]
-    lev_opts = list(HUNT_LEV_BREAKOUT if wide else HUNT_LEV_POLISH) if aggressive else [int(base.leverage)]
+    lev_opts = (
+        list(HUNT_LEV_BREAKOUT if wide else HUNT_LEV_POLISH) if aggressive else [int(base.leverage)]
+    )
     open_opts = [4, 5, 6, 7, 8] if aggressive else [int(base.max_open_positions)]
-    strat_opts = list(HUNT_STRATEGIES) if (aggressive and wide) else (
-        list(HUNT_STRATEGIES) if (aggressive and rng.random() < 0.45) else
-        [(base.strategy or "trend_mtf").strip().lower()]
+    strat_opts = (
+        list(HUNT_STRATEGIES)
+        if (aggressive and wide)
+        else (
+            list(HUNT_STRATEGIES)
+            if (aggressive and rng.random() < 0.45)
+            else [(base.strategy or "trend_mtf").strip().lower()]
+        )
     )
     adx = float(rng.choice(adx_opts))
     risk = float(rng.choice(risk_opts))
@@ -481,8 +572,10 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     elif lev >= 10:
         tf = str(rng.choice(["5m", "5m", "15m"]))
     else:
-        tf = str(rng.choice(["5m", "15m", "15m"])) if wide else (
-            str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m"
+        tf = (
+            str(rng.choice(["5m", "15m", "15m"]))
+            if wide
+            else (str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m")
         )
         if rng.random() < 0.35:
             tf = "5m"
@@ -498,9 +591,9 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
         use_asymmetric_trail=bool(rng.choice([True, True, False])),
         initial_stop_atr=float(rng.choice(stop_opts)),
         cooldown_bars=int(rng.choice(cool_opts)),
-        require_rising_adx=False if rng.random() < 0.85 else True,
-        require_squeeze=False if rng.random() < 0.9 else True,
-        require_rsi_veto=False if rng.random() < 0.85 else True,
+        require_rising_adx=not rng.random() < 0.85,
+        require_squeeze=not rng.random() < 0.9,
+        require_rsi_veto=not rng.random() < 0.85,
         require_btc_regime=bool(rng.choice([True, False, False])),
         breakout_lookback=int(rng.choice(bo_lb_opts)),
         breakout_buffer_atr=float(rng.choice(bo_buf_opts)),
@@ -548,12 +641,14 @@ def _breakout_cfgs(base: Config, generation: int) -> list:
     for btc in (True, False):
         for rise in (False, True):
             for asym in (True, False):
-                seeds.append(replace(
-                    base,
-                    require_btc_regime=btc,
-                    require_rising_adx=rise,
-                    use_asymmetric_trail=asym,
-                ))
+                seeds.append(
+                    replace(
+                        base,
+                        require_btc_regime=btc,
+                        require_rising_adx=rise,
+                        use_asymmetric_trail=asym,
+                    )
+                )
     seeds.extend(_polish_cfgs(base)[:8])
     return seeds
 
@@ -577,18 +672,23 @@ def _leverage_ladder_cfgs(base: Config) -> list:
     seeds = []
     for lev in HUNT_LEV_FORCE:
         tf = _tf_for_leverage(int(lev), str(base.timeframe))
-        seeds.append(replace(
-            base,
-            leverage=int(lev),
-            timeframe=tf,
-            max_account_leverage=float(max(float(lev), float(base.max_account_leverage))),
-            max_net_leverage=float(max(float(lev), float(getattr(base, "max_net_leverage", lev)))),
-        ))
+        seeds.append(
+            replace(
+                base,
+                leverage=int(lev),
+                timeframe=tf,
+                max_account_leverage=float(max(float(lev), float(base.max_account_leverage))),
+                max_net_leverage=float(
+                    max(float(lev), float(getattr(base, "max_net_leverage", lev)))
+                ),
+            )
+        )
     return seeds
 
 
-def _candidate_cfgs(base: Config, generation: int = 0, hunt: bool = True,
-                    search_mode: str = "polish") -> list:
+def _candidate_cfgs(
+    base: Config, generation: int = 0, hunt: bool = True, search_mode: str = "polish"
+) -> list:
     """
     polish: nudges around current best.
     explore: wider random + local ring.
@@ -645,9 +745,15 @@ def _prepare_cached(raw: dict, cfg: Config, cache: dict) -> dict:
     return data
 
 
-def _hard_promising(ci: BacktestResult, co: BacktestResult,
-                    best_i: BacktestResult, best_o: BacktestResult,
-                    best_score: int, *, slack: int = 2) -> bool:
+def _hard_promising(
+    ci: BacktestResult,
+    co: BacktestResult,
+    best_i: BacktestResult,
+    best_o: BacktestResult,
+    best_score: int,
+    *,
+    slack: int = 2,
+) -> bool:
     """True if hard book is worth the soft-run cost."""
     if not _is_screenable(ci, co):
         return False
@@ -662,9 +768,7 @@ def _hard_promising(ci: BacktestResult, co: BacktestResult,
         return True
     if co.win_rate >= best_o.win_rate - 0.05:
         return True
-    if _rank_key(ci, co, None) > _rank_key(best_i, best_o, None):
-        return True
-    return False
+    return _rank_key(ci, co, None) > _rank_key(best_i, best_o, None)
 
 
 def _eval_cfg(data: dict, cfg: Config, split, *, end=None) -> tuple:
@@ -690,10 +794,10 @@ def _eval_soft_oos(data: dict, cfg: Config, split, *, end=None) -> BacktestResul
 # Depth comes from HUNT_WF_DAYS (calendar) via _hunt_fetch_wf_raw.
 # ------------------------------------------------------------
 WF_FOLDS = 3
-WF_WARMUP_DAYS = 60              # skip indicator warm-up at the very start
+WF_WARMUP_DAYS = 60  # skip indicator warm-up at the very start
 WF_MIN_FOLD_TRADES = 8
 WF_MIN_FOLDS_USED = 2
-WF_WORST_FOLD_FLOOR = -0.15      # no unseen fold may lose more than 15%
+WF_WORST_FOLD_FLOOR = -0.15  # no unseen fold may lose more than 15%
 # Legacy bar map (unused for fetch; kept so old notebooks don't NameError).
 WF_BARS = {"4h": 16000, "15m": 20000, "5m": 36000, "3m": 45000}
 
@@ -713,13 +817,16 @@ def _wf_eval(wf_data: dict, cfg: Config, hunt_start, cache_note: str = "") -> di
     for k in range(WF_FOLDS):
         a, b = edges[k], edges[k + 1]
         res = BacktestEngine(wf_data, soft, start=a, end=b).run(label)
-        folds.append({
-            "from": f"{a:%Y-%m-%d}", "to": f"{b:%Y-%m-%d}",
-            "trades": int(res.trades),
-            "exp": round(float(res.expectancy_r), 3),
-            "ret": round(float(res.total_return), 3),
-            "win": round(float(res.win_rate), 3),
-        })
+        folds.append(
+            {
+                "from": f"{a:%Y-%m-%d}",
+                "to": f"{b:%Y-%m-%d}",
+                "trades": int(res.trades),
+                "exp": round(float(res.expectancy_r), 3),
+                "ret": round(float(res.total_return), 3),
+                "win": round(float(res.win_rate), 3),
+            }
+        )
     used = [f for f in folds if f["trades"] >= WF_MIN_FOLD_TRADES]
     n_tot = sum(f["trades"] for f in used)
     w_exp = (sum(f["exp"] * f["trades"] for f in used) / n_tot) if n_tot else 0.0
@@ -728,7 +835,7 @@ def _wf_eval(wf_data: dict, cfg: Config, hunt_start, cache_note: str = "") -> di
     ok = bool(
         len(used) >= WF_MIN_FOLDS_USED
         and w_exp > 0
-        and green * 3 >= len(used) * 2          # ≥ 2/3 of used folds green
+        and green * 3 >= len(used) * 2  # ≥ 2/3 of used folds green
         and worst >= WF_WORST_FOLD_FLOOR
     )
     if len(used) < WF_MIN_FOLDS_USED:
@@ -742,29 +849,40 @@ def _wf_eval(wf_data: dict, cfg: Config, hunt_start, cache_note: str = "") -> di
     else:
         why = "passed"
     return {
-        "ok": ok, "why": why, "folds": folds, "trades": int(n_tot),
-        "exp": round(float(w_exp), 3), "green": f"{green}/{len(used)}",
+        "ok": ok,
+        "why": why,
+        "folds": folds,
+        "trades": int(n_tot),
+        "exp": round(float(w_exp), 3),
+        "green": f"{green}/{len(used)}",
         "worst": round(float(worst), 3),
         "span": f"{a0:%Y-%m-%d} → {pd.Timestamp(hunt_start):%Y-%m-%d}",
     }
 
 
-FWD_MIN_TRADES = 20      # closed forward paper trades required before the score can exceed 85
+FWD_MIN_TRADES = 20  # closed forward paper trades required before the score can exceed 85
 FWD_SCORE_CAP = 85
 
 # Recent-window signal (not a hard promote veto while the book is climbing)
 RECENT_DAYS = 90
 RECENT_MIN_TRADES = 12
-RECENT_EXP_FLOOR = -0.25   # climb-friendly; deep bleed still flagged, mild drag OK
+RECENT_EXP_FLOOR = -0.25  # climb-friendly; deep bleed still flagged, mild drag OK
 
 # Primary money holdout (calendar days frozen out of fit / scored for promote).
 # 14d > old 7d — more trades / power before research promote.
 WEEK_DAYS = 14
 
 
-def _window_eval(data: dict, cfg: Config, days: int,
-                 end: Optional[pd.Timestamp] = None, *, soft: bool = True,
-                 min_trades: int = 0, exp_floor: float = -99.0) -> dict:
+def _window_eval(
+    data: dict,
+    cfg: Config,
+    days: int,
+    end: Optional[pd.Timestamp] = None,
+    *,
+    soft: bool = True,
+    min_trades: int = 0,
+    exp_floor: float = -99.0,
+) -> dict:
     """Hard or soft backtest over the last `days` ending at `end`."""
     if end is None:
         end = max(sd.bars[-1].Index for sd in data.values())
@@ -779,35 +897,51 @@ def _window_eval(data: dict, cfg: Config, days: int,
         res = BacktestEngine(data, run_cfg, start=start, end=end).run(lab)
     except Exception as e:
         return {
-            "ok": False, "why": f"{days}d eval failed: {e}",
-            "trades": 0, "exp": 0.0, "ret": 0.0, "final": 0.0,
+            "ok": False,
+            "why": f"{days}d eval failed: {e}",
+            "trades": 0,
+            "exp": 0.0,
+            "ret": 0.0,
+            "final": 0.0,
             "span": f"{start:%Y-%m-%d} → {pd.Timestamp(end):%Y-%m-%d}",
-            "days": int(days), "soft": bool(soft),
+            "days": int(days),
+            "soft": bool(soft),
         }
     thin = int(min_trades) > 0 and res.trades < int(min_trades)
     ok = (not thin) and float(res.expectancy_r) >= float(exp_floor)
     why = (
-        "passed" if ok else
-        (f"thin {days}d sample n={res.trades}" if thin
-         else f"{days}d exp {res.expectancy_r:+.2f}R < {exp_floor}")
+        "passed"
+        if ok
+        else (
+            f"thin {days}d sample n={res.trades}"
+            if thin
+            else f"{days}d exp {res.expectancy_r:+.2f}R < {exp_floor}"
+        )
     )
     return {
-        "ok": ok, "why": why,
+        "ok": ok,
+        "why": why,
         "trades": int(res.trades),
         "exp": round(float(res.expectancy_r), 3),
         "ret": round(float(res.total_return), 3),
         "final": round(float(res.final_equity), 2),
         "win": round(float(res.win_rate), 3),
         "span": f"{start:%Y-%m-%d} → {pd.Timestamp(end):%Y-%m-%d}",
-        "days": int(days), "soft": bool(soft),
+        "days": int(days),
+        "soft": bool(soft),
     }
 
 
 def _recent_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) -> dict:
     """Soft (kills off) expectancy over the last RECENT_DAYS ending at `end`."""
     return _window_eval(
-        data, cfg, RECENT_DAYS, end=end, soft=True,
-        min_trades=RECENT_MIN_TRADES, exp_floor=RECENT_EXP_FLOOR,
+        data,
+        cfg,
+        RECENT_DAYS,
+        end=end,
+        soft=True,
+        min_trades=RECENT_MIN_TRADES,
+        exp_floor=RECENT_EXP_FLOOR,
     )
 
 
@@ -815,12 +949,22 @@ def _week_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) -> d
     """PRIMARY: hard + soft P&L over the last WEEK_DAYS calendar days."""
     week_min = int(HUNT_TARGETS.get("week_min_trades", 2))
     hard = _window_eval(
-        data, cfg, WEEK_DAYS, end=end, soft=False,
-        min_trades=week_min, exp_floor=-0.50,
+        data,
+        cfg,
+        WEEK_DAYS,
+        end=end,
+        soft=False,
+        min_trades=week_min,
+        exp_floor=-0.50,
     )
     soft = _window_eval(
-        data, cfg, WEEK_DAYS, end=end, soft=True,
-        min_trades=0, exp_floor=-99.0,
+        data,
+        cfg,
+        WEEK_DAYS,
+        end=end,
+        soft=True,
+        min_trades=0,
+        exp_floor=-99.0,
     )
     week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
     met = bool(hard.get("ok") and float(hard.get("ret") or 0) >= week_tgt)
@@ -862,8 +1006,11 @@ def _forward_record(symbols: list, since_iso: str) -> dict:
     except Exception as e:
         log.warning("forward record unavailable: %s", e)
     return {
-        "n": n, "pnl": round(pnl, 2), "win": round(wins / n, 3) if n else 0.0,
-        "need": FWD_MIN_TRADES, "since": since_iso,
+        "n": n,
+        "pnl": round(pnl, 2),
+        "win": round(wins / n, 3) if n else 0.0,
+        "need": FWD_MIN_TRADES,
+        "since": since_iso,
         "ok": bool(n >= FWD_MIN_TRADES and pnl > 0),
     }
 
@@ -873,14 +1020,16 @@ def _wf_msg(wf: Optional[dict]) -> str:
         return "unseen-history check not run"
     verdict = "PASS" if wf.get("ok") else "FAIL"
     return (
-        f"unseen {wf.get('span','')} {verdict} ({wf.get('green','?')} periods green, "
+        f"unseen {wf.get('span', '')} {verdict} ({wf.get('green', '?')} periods green, "
         f"{wf.get('exp', 0):+.2f}R avg, {wf.get('trades', 0)} trades"
-        + ("" if wf.get("ok") else f" — {wf.get('why','')}") + ")"
+        + ("" if wf.get("ok") else f" — {wf.get('why', '')}")
+        + ")"
     )
 
 
-def _score(ins: BacktestResult, oos: BacktestResult,
-           soft_oos: Optional[BacktestResult] = None) -> float:
+def _score(
+    ins: BacktestResult, oos: BacktestResult, soft_oos: Optional[BacktestResult] = None
+) -> float:
     """Tie-break scalar only — display / upgrades use _grade()['score']."""
     min_test = int(HUNT_TARGETS.get("test_n", 40))
     min_train = int(HUNT_TARGETS.get("train_n", 40))
@@ -928,9 +1077,12 @@ def _score(ins: BacktestResult, oos: BacktestResult,
     )
 
 
-def _rank_key(ins: BacktestResult, oos: BacktestResult,
-              soft_oos: Optional[BacktestResult] = None,
-              week: Optional[dict] = None) -> tuple:
+def _rank_key(
+    ins: BacktestResult,
+    oos: BacktestResult,
+    soft_oos: Optional[BacktestResult] = None,
+    week: Optional[dict] = None,
+) -> tuple:
     """
     Primary sort = quality /100 the user sees (now includes $ return + soft-run).
     Holdout week return is part of the key when supplied (F1).
@@ -951,21 +1103,30 @@ def _rank_key(ins: BacktestResult, oos: BacktestResult,
     )
 
 
-def _beats(a_i: BacktestResult, a_o: BacktestResult,
-           b_i: BacktestResult, b_o: BacktestResult,
-           a_soft: Optional[BacktestResult] = None,
-           b_soft: Optional[BacktestResult] = None,
-           a_week: Optional[dict] = None,
-           b_week: Optional[dict] = None) -> bool:
+def _beats(
+    a_i: BacktestResult,
+    a_o: BacktestResult,
+    b_i: BacktestResult,
+    b_o: BacktestResult,
+    a_soft: Optional[BacktestResult] = None,
+    b_soft: Optional[BacktestResult] = None,
+    a_week: Optional[dict] = None,
+    b_week: Optional[dict] = None,
+) -> bool:
     """True if A is strictly better than B for hunting."""
     return _rank_key(a_i, a_o, a_soft, a_week) > _rank_key(b_i, b_o, b_soft, b_week)
 
 
-def _grade(ins: BacktestResult, oos: BacktestResult,
-           soft_oos: Optional[BacktestResult] = None,
-           wf: Optional[dict] = None, wf_required: bool = False,
-           fwd: Optional[dict] = None, fwd_required: bool = False,
-           week: Optional[dict] = None) -> dict:
+def _grade(
+    ins: BacktestResult,
+    oos: BacktestResult,
+    soft_oos: Optional[BacktestResult] = None,
+    wf: Optional[dict] = None,
+    wf_required: bool = False,
+    fwd: Optional[dict] = None,
+    fwd_required: bool = False,
+    week: Optional[dict] = None,
+) -> dict:
     """0–100 score vs HUNT_TARGETS + checklist for the Live page.
 
     Primary money bar is 7-day return when `week` is supplied.
@@ -984,12 +1145,8 @@ def _grade(ins: BacktestResult, oos: BacktestResult,
     week_ret = float((week or {}).get("ret") or 0.0)
     week_soft = float((week or {}).get("soft_ret") or 0.0) if week is not None else 0.0
     week_hard_floor = float(t.get("week_hard_floor", 0.25))
-    kill_illusion = (
-        hard_halted and soft_oos is not None and soft_ret < hard_ret - 0.05
-    )
-    over_killed = (
-        hard_halted and soft_oos is not None and soft_ret > hard_ret + 0.10
-    )
+    kill_illusion = hard_halted and soft_oos is not None and soft_ret < hard_ret - 0.05
+    over_killed = hard_halted and soft_oos is not None and soft_ret > hard_ret + 0.10
     checks = {
         "train_exp": ins.expectancy_r >= t["train_exp"],
         "test_exp": oos.expectancy_r >= t["test_exp"],
@@ -1000,8 +1157,7 @@ def _grade(ins: BacktestResult, oos: BacktestResult,
         "test_return": hard_ret >= ret_tgt,
         "soft_ok": soft_ret >= soft_floor,
         "both_positive": (
-            ins.expectancy_r > 0 and oos.expectancy_r > 0
-            and ins.total_return > 0 and hard_ret > 0
+            ins.expectancy_r > 0 and oos.expectancy_r > 0 and ins.total_return > 0 and hard_ret > 0
         ),
     }
     if week is not None:
@@ -1097,13 +1253,12 @@ def _is_screenable(cand_i: BacktestResult, cand_o: BacktestResult) -> bool:
     min_n = max(6, min(12, int(HUNT_TARGETS.get("test_n", 20)) // 2))
     if cand_o.trades < min_n or cand_i.trades < min_n:
         return False
-    if cand_o.max_drawdown > 0.85:
-        return False
-    return True
+    return not cand_o.max_drawdown > 0.85
 
 
-def _is_valid_candidate(cand_i: BacktestResult, cand_o: BacktestResult,
-                        soft_oos: Optional[BacktestResult] = None) -> bool:
+def _is_valid_candidate(
+    cand_i: BacktestResult, cand_o: BacktestResult, soft_oos: Optional[BacktestResult] = None
+) -> bool:
     """Strict gate for 'healthy book' claims (elite / targets). Not used to enter soft pool."""
     min_test = int(HUNT_TARGETS.get("test_n", 40))
     min_train = int(HUNT_TARGETS.get("train_n", 40))
@@ -1116,20 +1271,21 @@ def _is_valid_candidate(cand_i: BacktestResult, cand_o: BacktestResult,
     soft_floor = float(HUNT_TARGETS.get("soft_return_floor", -0.10))
     if soft_oos is not None and soft_oos.total_return < soft_floor:
         return False
-    if (
+    return not (
         HUNT_TARGETS.get("block_kill_illusion", True)
         and soft_oos is not None
         and (cand_o.halted or "").strip()
         and soft_oos.total_return < cand_o.total_return - 0.05
-    ):
-        return False
-    return True
+    )
 
 
-def _is_climb_ok(cand_i: BacktestResult, cand_o: BacktestResult,
-                 soft_oos: Optional[BacktestResult],
-                 base_i: Optional[BacktestResult] = None,
-                 base_o: Optional[BacktestResult] = None) -> bool:
+def _is_climb_ok(
+    cand_i: BacktestResult,
+    cand_o: BacktestResult,
+    soft_oos: Optional[BacktestResult],
+    base_i: Optional[BacktestResult] = None,
+    base_o: Optional[BacktestResult] = None,
+) -> bool:
     """Research-promote gate: allow relative climb from a losing baseline.
 
     Soft floor loosens while baseline is underwater so soft-check can feed
@@ -1138,9 +1294,9 @@ def _is_climb_ok(cand_i: BacktestResult, cand_o: BacktestResult,
     if not _is_screenable(cand_i, cand_o):
         return False
     baseline_losing = (
-        base_i is not None and base_o is not None
-        and (base_i.expectancy_r <= 0 or base_o.expectancy_r <= 0
-             or base_o.total_return <= 0)
+        base_i is not None
+        and base_o is not None
+        and (base_i.expectancy_r <= 0 or base_o.expectancy_r <= 0 or base_o.total_return <= 0)
     )
     soft_floor = float(HUNT_TARGETS.get("soft_return_floor", -0.30))
     if baseline_losing:
@@ -1181,12 +1337,12 @@ def _discover_seed_cfgs(base: Config, generation: int, held: int) -> list:
         return []
     seeds = []
     for i, _rule in enumerate(top):
-        seeds.append(replace(
-            base,
-            strategy="momentum_rule" if i % 2 == 0 else "combo_or",
-            timeframe=str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m",
-        ))
+        seeds.append(
+            replace(
+                base,
+                strategy="momentum_rule" if i % 2 == 0 else "combo_or",
+                timeframe=str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m",
+            )
+        )
     log.info("discover inject: %d seed(s) from %s", len(seeds), path.name)
     return seeds
-
-

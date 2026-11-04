@@ -1,4 +1,5 @@
 """Filesystem roots for Moonshot — single source of truth."""
+
 from __future__ import annotations
 
 from pathlib import Path

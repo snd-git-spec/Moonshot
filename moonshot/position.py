@@ -1,33 +1,22 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
-import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    AddRecord, Direction, ExitReason, Lot, RiskError, TradeResult,
+    AddRecord,
+    Direction,
+    ExitReason,
+    Lot,
+    RiskError,
+    TradeResult,
 )
+
 
 @dataclass
 class Position:
@@ -50,10 +39,31 @@ class Position:
 
     # ---- construction ----
     @classmethod
-    def open(cls, symbol: str, direction: Direction, leverage: int, price: float,
-             qty: float, stop: float, ts: datetime, fee: float) -> "Position":
-        return cls(symbol, direction, leverage, ts, price, qty, stop, price, qty, stop,
-                   lots=[Lot(price, qty, ts)], fees=fee)
+    def open(
+        cls,
+        symbol: str,
+        direction: Direction,
+        leverage: int,
+        price: float,
+        qty: float,
+        stop: float,
+        ts: datetime,
+        fee: float,
+    ) -> "Position":
+        return cls(
+            symbol,
+            direction,
+            leverage,
+            ts,
+            price,
+            qty,
+            stop,
+            price,
+            qty,
+            stop,
+            lots=[Lot(price, qty, ts)],
+            fees=fee,
+        )
 
     # ---- derived ----
     @property
@@ -110,8 +120,15 @@ class Position:
             return True
         return False
 
-    def add_lot(self, price: float, qty: float, ts: datetime, fee: float,
-                new_stop: float, floating_used: float) -> None:
+    def add_lot(
+        self,
+        price: float,
+        qty: float,
+        ts: datetime,
+        fee: float,
+        new_stop: float,
+        floating_used: float,
+    ) -> None:
         if not self.is_tighter(new_stop):
             raise RiskError(f"refusing to widen stop {self.current_stop} -> {new_stop}")
         r_at_add = self.r_multiple(price)
@@ -131,18 +148,29 @@ class Position:
         self.current_qty -= qty
         return gross
 
-    def close_out(self, price: float, fee: float, ts: datetime, reason: ExitReason,
-                  liquidated: bool = False) -> tuple:
+    def close_out(
+        self, price: float, fee: float, ts: datetime, reason: ExitReason, liquidated: bool = False
+    ) -> tuple:
         """Close the remainder. Returns (TradeResult, cash_delta)."""
         gross = self.sign * (price - self.avg_entry) * self.current_qty
         net = self.realized_gross + gross - self.fees - fee - self.funding
         risk = self.initial_risk_dollars
         res = TradeResult(
-            symbol=self.symbol, direction=self.direction, entry_time=self.entry_time,
-            exit_time=ts, entry_price=self.initial_entry, exit_price=price,
-            initial_qty=self.initial_qty, pnl=net, r_multiple=net / risk if risk > 0 else 0.0,
-            liquidated=liquidated, exit_reason=reason, max_adds=self.adds_count,
-            partial_taken=self.partial_done, fees=self.fees + fee, funding=self.funding,
+            symbol=self.symbol,
+            direction=self.direction,
+            entry_time=self.entry_time,
+            exit_time=ts,
+            entry_price=self.initial_entry,
+            exit_price=price,
+            initial_qty=self.initial_qty,
+            pnl=net,
+            r_multiple=net / risk if risk > 0 else 0.0,
+            liquidated=liquidated,
+            exit_reason=reason,
+            max_adds=self.adds_count,
+            partial_taken=self.partial_done,
+            fees=self.fees + fee,
+            funding=self.funding,
         )
         self.current_qty = 0.0
         return res, gross - fee
@@ -161,10 +189,16 @@ class Position:
         d = dict(d)
         d["direction"] = Direction(d["direction"])
         d["entry_time"] = pd.Timestamp(d["entry_time"])
-        d["lots"] = [Lot(l["price"], l["qty"], pd.Timestamp(l["time"])) for l in d["lots"]]
-        d["adds"] = [AddRecord(a["price"], a["qty"], a["stop_at_add"], a["r_at_add"],
-                               a["floating_profit_used"], pd.Timestamp(a["time"]))
-                     for a in d["adds"]]
+        d["lots"] = [Lot(lot["price"], lot["qty"], pd.Timestamp(lot["time"])) for lot in d["lots"]]
+        d["adds"] = [
+            AddRecord(
+                a["price"],
+                a["qty"],
+                a["stop_at_add"],
+                a["r_at_add"],
+                a["floating_profit_used"],
+                pd.Timestamp(a["time"]),
+            )
+            for a in d["adds"]
+        ]
         return cls(**d)
-
-

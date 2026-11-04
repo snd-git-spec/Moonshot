@@ -7,7 +7,7 @@ name = "moonshot"
 version = "0.1.0"
 description = "Practice trading bot for MEXC futures with hunt/autopilot"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "numpy>=1.24",
   "pandas>=2.0",
@@ -21,7 +21,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.8"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "C4", "SIM"]
+# E501: gradual; E402: logger/bootstrap often precedes imports in this package
+ignore = ["E501", "E402"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+follow_imports = "silent"
+files = ["moonshot/config.py", "moonshot/risk.py"]
 
 [project.scripts]
 moonshot = "moonshot.cli:main"

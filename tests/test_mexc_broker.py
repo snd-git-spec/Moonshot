@@ -1,7 +1,7 @@
 """MexcBroker dry-run + mocked CCXT param construction."""
+
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,7 +21,11 @@ def test_dry_run_logs_without_network(cfg: Config) -> None:
     assert b.get_equity() == cfg.starting_equity
     ops = [c["op"] for c in b._call_log]
     assert ops == [
-        "set_leverage", "create_order", "set_stop", "cancel_stop", "fetch_balance",
+        "set_leverage",
+        "create_order",
+        "set_stop",
+        "cancel_stop",
+        "fetch_balance",
     ]
     # Opening order params include isolated openType + leverage
     create = next(c for c in b._call_log if c["op"] == "create_order")
@@ -45,7 +49,10 @@ def test_mocked_exchange_create_order_params(cfg: Config) -> None:
     ex.amount_to_precision.side_effect = lambda _s, q: q
     ex.price_to_precision.side_effect = lambda _s, p: p
     ex.create_order.return_value = {
-        "id": "oid-1", "average": 100.5, "filled": 0.01, "fee": {"cost": 0.01},
+        "id": "oid-1",
+        "average": 100.5,
+        "filled": 0.01,
+        "fee": {"cost": 0.01},
     }
     b = MexcBroker(cfg, dry_run=False, exchange=ex)
     b.set_leverage("BTC/USDT:USDT", 7)

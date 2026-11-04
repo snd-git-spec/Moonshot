@@ -1,4 +1,5 @@
 """BacktestEngine determinism on synthetic OHLCV."""
+
 from __future__ import annotations
 
 import math
@@ -11,8 +12,7 @@ from moonshot.features import prepare_data
 
 def _run_twice(cfg: Config):
     raw = {
-        s: synthetic_ohlcv(s, 1200, tf=cfg.timeframe)
-        for s in ("BTC/USDT:USDT", "ETH/USDT:USDT")
+        s: synthetic_ohlcv(s, 1200, tf=cfg.timeframe) for s in ("BTC/USDT:USDT", "ETH/USDT:USDT")
     }
     data = prepare_data(raw, cfg)
     a = BacktestEngine(data, cfg).run()

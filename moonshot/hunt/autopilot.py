@@ -3,25 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-import numpy as np
-import pandas as pd
 
 log = logging.getLogger("moonshot")
 
@@ -32,13 +21,18 @@ from moonshot.data import (
     clear_stale_live_caches,
 )
 from moonshot.symbols import (
-    HUNT_SYMBOLS, PAPER_SYMBOLS,
+    HUNT_SYMBOLS,
+    PAPER_SYMBOLS,
 )
 from moonshot.live import (
-    _live_feed, _utc_now,
+    _live_feed,
+    _utc_now,
 )
 from moonshot.hunt.constants import (
-    HUNT_TARGETS, _load_autopilot_state, _pct_of_risk_msg, _save_autopilot_state,
+    HUNT_TARGETS,
+    _load_autopilot_state,
+    _pct_of_risk_msg,
+    _save_autopilot_state,
 )
 from moonshot.hunt.scoring import (
     POST_PROMOTE_HUNT_PAUSE_SEC,
@@ -48,9 +42,9 @@ from moonshot.hunt.improve import (
 )
 
 from moonshot.paths import (
-    ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
-    PAPER_RUNTIME_PATH, RULES_PATH,
+    ROOT,
 )
+
 
 class PaperSupervisor:
     """Keep `python -m moonshot paper` alive as a child process."""
@@ -68,7 +62,8 @@ class PaperSupervisor:
                 cmd += ["--symbols", *self.symbols]
             log.info("starting paper child: %s", " ".join(cmd))
             self.proc = subprocess.Popen(
-                cmd, cwd=str(ROOT),
+                cmd,
+                cwd=str(ROOT),
                 env={**os.environ, "LIVE_TRADING_ENABLED": "0"},
             )
 
@@ -99,7 +94,8 @@ class PaperSupervisor:
                     cmd += ["--symbols", *self.symbols]
                 log.info("starting paper child: %s", " ".join(cmd))
                 self.proc = subprocess.Popen(
-                    cmd, cwd=str(ROOT),
+                    cmd,
+                    cwd=str(ROOT),
                     env={**os.environ, "LIVE_TRADING_ENABLED": "0"},
                 )
 
@@ -142,8 +138,12 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     if args.improve_only:
         gen = int(state.get("generation", 0))
         decision = improve_once(
-            symbols, bars=args.bars, oos_frac=args.oos,
-            refresh=args.refresh, generation=gen, hunt=hunt,
+            symbols,
+            bars=args.bars,
+            oos_frac=args.oos,
+            refresh=args.refresh,
+            generation=gen,
+            hunt=hunt,
         )
         print(decision["message"])
         print(json.dumps({"best": decision["best"], "grade": decision.get("grade")}, indent=2))
@@ -161,8 +161,12 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
             just_promoted = False
             try:
                 decision = improve_once(
-                    symbols, bars=args.bars, oos_frac=args.oos,
-                    refresh=False, generation=gen_box["n"], hunt=hunt,
+                    symbols,
+                    bars=args.bars,
+                    oos_frac=args.oos,
+                    refresh=False,
+                    generation=gen_box["n"],
+                    hunt=hunt,
                 )
                 gen_box["n"] += 1
                 met = bool((decision.get("grade") or {}).get("targets_met"))
@@ -197,7 +201,10 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     log.info(
         "AUTOPILOT ON — HUNT %d coins · %s · targets test_exp>=%.2f n>=%d · "
         "re-runs IMMEDIATELY until targets met · practice only",
-        len(symbols), ",".join(symbols), HUNT_TARGETS["test_exp"], HUNT_TARGETS["test_n"],
+        len(symbols),
+        ",".join(symbols),
+        HUNT_TARGETS["test_exp"],
+        HUNT_TARGETS["test_n"],
     )
     _live_feed(
         "autopilot_on",
@@ -205,7 +212,9 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
         f"(avg ≥{_pct_of_risk_msg(HUNT_TARGETS['test_exp'])}, "
         f"win ≥{HUNT_TARGETS['win_rate']:.0%}, ≥{HUNT_TARGETS['test_n']} trades). "
         f"Fake money only.",
-        cooldown=0, targets=HUNT_TARGETS, symbols=symbols,
+        cooldown=0,
+        targets=HUNT_TARGETS,
+        symbols=symbols,
     )
 
     try:
@@ -221,5 +230,3 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     finally:
         stop.set()
         supervisor.stop()
-
-

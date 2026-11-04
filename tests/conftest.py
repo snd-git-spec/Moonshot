@@ -1,4 +1,5 @@
 """Shared fixtures for Moonshot unit tests (no network)."""
+
 from __future__ import annotations
 
 import pytest
@@ -23,8 +24,5 @@ def cfg() -> Config:
 
 @pytest.fixture
 def synthetic_book(cfg: Config) -> dict:
-    raw = {
-        s: synthetic_ohlcv(s, 800, tf=cfg.timeframe)
-        for s in ("BTC/USDT:USDT", "ETH/USDT:USDT")
-    }
+    raw = {s: synthetic_ohlcv(s, 800, tf=cfg.timeframe) for s in ("BTC/USDT:USDT", "ETH/USDT:USDT")}
     return prepare_data(raw, cfg)

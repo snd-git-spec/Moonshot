@@ -1,4 +1,5 @@
 """PaperBroker fills, slippage, PnL, reduce-only."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -6,7 +7,7 @@ import pytest
 
 from moonshot.brokers import PaperBroker
 from moonshot.config import Config
-from moonshot.types import ConfigError, Direction, ExecutionError
+from moonshot.types import Direction, ExecutionError
 
 
 def test_open_and_equity_tracks_mark(cfg: Config) -> None:
@@ -58,7 +59,14 @@ def test_rehydrate_restores_position(cfg: Config) -> None:
     t0 = pd.Timestamp("2025-01-01", tz="UTC")
     restored = {
         "BTC/USDT:USDT": Position.open(
-            "BTC/USDT:USDT", Direction.LONG, 5, 100.0, 1.0, 98.0, t0, 0.02,
+            "BTC/USDT:USDT",
+            Direction.LONG,
+            5,
+            100.0,
+            1.0,
+            98.0,
+            t0,
+            0.02,
         ),
     }
     pb.rehydrate(restored, closed_pnl=-1.5)

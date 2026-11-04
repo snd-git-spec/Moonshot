@@ -932,6 +932,12 @@ section_header("Results", "Performance · equity · pace · price with entries/e
 
 if lab.get("full") is not None:
     res: ms.BacktestResult = lab["full"]
+    if res.halted:
+        st.warning(
+            f"**Risk circuit tripped (then resumes in backtest):** {res.halted}. "
+            "Live/paper still permanent-kill; backtests pause ~7d then trade again. "
+            "Flat stretches are pause windows — not “no setups forever.”"
+        )
     ret_tone = "good" if res.total_return >= 0 else "bad"
     dd_tone = "bad" if res.max_drawdown >= 0.25 else ""
     stat_grid(
@@ -994,8 +1000,6 @@ if lab.get("full") is not None:
         st.dataframe(_trades_frame(res.trade_list), width="stretch", hide_index=True, height=320)
     else:
         st.caption("None in this window.")
-    if res.halted:
-        st.warning(f"Bot stopped itself during the window: {res.halted}")
 
 else:
     older: ms.BacktestResult = lab["older"]

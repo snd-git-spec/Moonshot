@@ -1,54 +1,60 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
 import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
 import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
 
 from moonshot.types import (
-    BrokerPosition, ConfigError, DataError, Direction, ExecutionError, Fill,
+    BrokerPosition,
+    ConfigError,
+    DataError,
+    Direction,
+    ExecutionError,
+    Fill,
     InstrumentSpec,
 )
 from moonshot.config import (
     Config,
 )
 from moonshot.data import (
-    _OHLCV_LOCK, fetch_historical, ohlcv_to_frame, paged_ohlcv, public_exchange, timeframe_ms,
+    _OHLCV_LOCK,
+    fetch_historical,
+    ohlcv_to_frame,
+    paged_ohlcv,
+    public_exchange,
+    timeframe_ms,
 )
+
 
 class BaseBroker:
     """Quantities are BASE units; brokers convert to exchange contracts internally."""
 
     def set_leverage(self, symbol: str, leverage: int) -> None: ...
-    def market_order(self, symbol: str, side: str, qty: float, ref_price: float,
-                     reduce_only: bool = False) -> Fill: raise NotImplementedError
+    def market_order(
+        self, symbol: str, side: str, qty: float, ref_price: float, reduce_only: bool = False
+    ) -> Fill:
+        raise NotImplementedError
+
     def set_stop(self, symbol: str, direction: Direction, qty: float, stop: float) -> None:
         raise NotImplementedError
-    def cancel_stop(self, symbol: str) -> None: raise NotImplementedError
-    def get_position(self, symbol: str) -> Optional[BrokerPosition]: raise NotImplementedError
-    def get_equity(self) -> float: raise NotImplementedError
+
+    def cancel_stop(self, symbol: str) -> None:
+        raise NotImplementedError
+
+    def get_position(self, symbol: str) -> Optional[BrokerPosition]:
+        raise NotImplementedError
+
+    def get_equity(self) -> float:
+        raise NotImplementedError
+
     def on_price(self, symbol: str, price: float) -> None: ...
-    def pop_stop_fill(self, symbol: str) -> Optional[Fill]: return None
+    def pop_stop_fill(self, symbol: str) -> Optional[Fill]:
+        return None
 
 
 class PaperBroker(BaseBroker):
@@ -60,9 +66,15 @@ class PaperBroker(BaseBroker):
         self.signed: dict = {}  # symbol -> signed qty
         self.avg: dict = {}
         self.stops: dict = {}  # symbol -> stop price
-        self.last: dict = {}
+        self.last: dict = {}  # symbol -> last mark (for unrealized)
         self._stop_fills: dict = {}
         self._n = 0
+        # After rehydrate, marks may be hours old — refuse new risk until on_price.
+        self.equity_stale: bool = False
+
+    def mark_snapshot(self) -> dict[str, float]:
+        """Persisted last marks so equity is reconstructable without a live tick."""
+        return {str(s): float(p) for s, p in self.last.items()}
 
     def _fill(self, symbol: str, side: str, qty: float, price: float) -> Fill:
         self._n += 1
@@ -104,7 +116,9 @@ class PaperBroker(BaseBroker):
         s = self.signed.get(symbol, 0.0)
         if s == 0:
             return None
-        return BrokerPosition(Direction.LONG if s > 0 else Direction.SHORT, abs(s), self.avg[symbol])
+        return BrokerPosition(
+            Direction.LONG if s > 0 else Direction.SHORT, abs(s), self.avg[symbol]
+        )
 
     def get_equity(self) -> float:
         eq = self.cash
@@ -114,7 +128,10 @@ class PaperBroker(BaseBroker):
         return eq
 
     def on_price(self, symbol, price) -> None:
-        self.last[symbol] = price
+        self.last[symbol] = float(price)
+        if self.equity_stale:
+            # First fresh mark after restart — equity is trustworthy again.
+            self.equity_stale = False
         s, stop = self.signed.get(symbol, 0.0), self.stops.get(symbol)
         if not s or stop is None:
             return
@@ -126,24 +143,40 @@ class PaperBroker(BaseBroker):
     def pop_stop_fill(self, symbol) -> Optional[Fill]:
         return self._stop_fills.pop(symbol, None)
 
-    def rehydrate(self, positions: dict, closed_pnl: float) -> None:
+    def rehydrate(
+        self,
+        positions: dict,
+        closed_pnl: float,
+        *,
+        last_marks: Optional[dict] = None,
+    ) -> None:
         """
         Restore broker state after a process restart.
         Without this, LiveRunner.load_positions() leaves PaperBroker empty, and the
         next _reconcile treats every restored position as 'exchange stop fired' and
         fabricates a -1R close. Cash = starting + closed trade PnL − open fees/funding.
+
+        Prefer ``last_marks`` from the runtime snapshot. Falls back to avg_entry only
+        when marks are missing, and marks equity stale until the next ``on_price``.
         """
         self.cash = float(self.cfg.starting_equity) + float(closed_pnl)
         self.signed.clear()
         self.avg.clear()
         self.stops.clear()
+        self.last.clear()
         self._stop_fills.clear()
+        marks = {str(k): float(v) for k, v in (last_marks or {}).items()}
         for sym, pos in positions.items():
             self.cash -= float(pos.fees) + float(pos.funding)
             self.signed[sym] = pos.sign * float(pos.current_qty)
             self.avg[sym] = float(pos.avg_entry)
             self.stops[sym] = float(pos.current_stop)
-            self.last[sym] = float(pos.avg_entry)
+            if sym in marks:
+                self.last[sym] = marks[sym]
+            else:
+                self.last[sym] = float(pos.avg_entry)
+        # Open book after restart → do not size new risk on possibly stale marks.
+        self.equity_stale = bool(self.signed)
 
 
 class MexcBroker(BaseBroker):
@@ -174,9 +207,7 @@ class MexcBroker(BaseBroker):
     ):
         self.cfg = cfg
         self.dry_run = (
-            bool(dry_run)
-            if dry_run is not None
-            else os.getenv("MEXC_DRY_RUN", "0").strip() == "1"
+            bool(dry_run) if dry_run is not None else os.getenv("MEXC_DRY_RUN", "0").strip() == "1"
         )
         self._lev: dict = {}
         self._stop_id: dict = {}
@@ -204,12 +235,14 @@ class MexcBroker(BaseBroker):
         if not key or not secret:
             raise ConfigError("MEXC_API_KEY / MEXC_API_SECRET not set")
         # Never log key/secret values.
-        self.ex = ccxt.mexc({
-            "apiKey": key,
-            "secret": secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "swap"},
-        })
+        self.ex = ccxt.mexc(
+            {
+                "apiKey": key,
+                "secret": secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+            }
+        )
         self.ex.load_markets()
 
     def _record(self, op: str, **payload) -> None:
@@ -234,7 +267,9 @@ class MexcBroker(BaseBroker):
                 self._halted = True
                 log.error(
                     "MEXC API circuit open after %d failures on %s: %s",
-                    self._api_fails, op, e,
+                    self._api_fails,
+                    op,
+                    e,
                 )
             raise
 
@@ -266,20 +301,31 @@ class MexcBroker(BaseBroker):
             raise ExecutionError("order size rounds to zero contracts")
         params: dict = {"reduceOnly": reduce_only}
         if not reduce_only:  # VERIFY: leverage + openType on opening orders
-            params.update({
-                "leverage": self._lev.get(symbol, self.cfg.leverage),
-                "openType": 1,
-            })
+            params.update(
+                {
+                    "leverage": self._lev.get(symbol, self.cfg.leverage),
+                    "openType": 1,
+                }
+            )
         self._record(
             "create_order",
-            symbol=symbol, side=side, amount=amount, ref_price=ref_price, params=dict(params),
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            ref_price=ref_price,
+            params=dict(params),
         )
         if self.dry_run:
             self._n += 1
             px = float(ref_price)
             fee = px * float(qty) * self.cfg.fee_taker
             return Fill(
-                f"dry-{self._n}", symbol, side, float(qty), px, fee,
+                f"dry-{self._n}",
+                symbol,
+                side,
+                float(qty),
+                px,
+                fee,
                 pd.Timestamp.now(tz="UTC"),
             )
         try:
@@ -293,8 +339,13 @@ class MexcBroker(BaseBroker):
         px = float(raw.get("average") or raw.get("price") or ref_price)
         fee = float((raw.get("fee") or {}).get("cost") or px * qty * self.cfg.fee_taker)
         return Fill(
-            str(raw["id"]), symbol, side, float(raw.get("filled") or amount) * size,
-            px, fee, pd.Timestamp.now(tz="UTC"),
+            str(raw["id"]),
+            symbol,
+            side,
+            float(raw.get("filled") or amount) * size,
+            px,
+            fee,
+            pd.Timestamp.now(tz="UTC"),
         )
 
     def set_stop(self, symbol, direction, qty, stop) -> None:
@@ -307,7 +358,11 @@ class MexcBroker(BaseBroker):
             stop_px = float(self.ex.price_to_precision(symbol, stop))
         params = {"stopLossPrice": stop_px, "reduceOnly": True}  # VERIFY trigger-market
         self._record(
-            "set_stop", symbol=symbol, side=side, amount=amount, params=dict(params),
+            "set_stop",
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            params=dict(params),
         )
         if self.dry_run:
             self._stop_id[symbol] = f"dry-stop-{symbol}"
@@ -316,7 +371,12 @@ class MexcBroker(BaseBroker):
             raw = self._api(
                 "set_stop",
                 lambda: self.ex.create_order(
-                    symbol, "market", side, amount, None, params,
+                    symbol,
+                    "market",
+                    side,
+                    amount,
+                    None,
+                    params,
                 ),
             )
         except Exception as e:  # noqa: BLE001
@@ -404,7 +464,5 @@ class MarketData:
                 raise DataError(
                     f"no OHLCV rows returned ({symbol} {tf}×{n}). "
                     "Exchange empty — usually rate-limit while hunt is fetching."
-                )
+                ) from None
             return ohlcv_to_frame(rows, tf)
-
-

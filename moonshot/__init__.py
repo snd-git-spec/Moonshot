@@ -1,4 +1,5 @@
 """Moonshot trading package — public API via import moonshot as ms."""
+
 from __future__ import annotations
 
 from moonshot.paths import (

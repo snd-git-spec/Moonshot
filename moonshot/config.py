@@ -1,26 +1,9 @@
 from __future__ import annotations
 
-import argparse
-import json
 import logging
-import math
 import os
-import signal
-import sqlite3
-import subprocess
-import sys
-import threading
-import time
-import uuid
-import zlib
-from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timezone
-from enum import Enum
-from itertools import product
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import dataclass
 
-import numpy as np
 import pandas as pd
 
 log = logging.getLogger("moonshot")
@@ -31,11 +14,14 @@ from moonshot.types import (
 )
 
 from moonshot.paths import ENV_PATH
+
 try:
     from dotenv import load_dotenv
+
     load_dotenv(ENV_PATH)
 except ImportError:
     pass
+
 
 @dataclass
 class Config:
@@ -57,12 +43,14 @@ class Config:
 
     # risk / kill switches
     max_daily_loss_pct: float = 0.15  # halts NEW risk until next UTC day
-    max_peak_drawdown_pct: float = 0.45  # permanent kill + flatten
+    max_peak_drawdown_pct: float = 0.45  # live: permanent kill; backtest: circuit pause
     streak_losses: int = 5  # consecutive losses -> temporary pause
     streak_pause_hours: float = 48.0
     expectancy_window: int = 30
     # 0.0 kills 15m books on normal noise (creates "kill illusion" OOS). Soft floor.
-    expectancy_floor: float = -0.15  # rolling expectancy below this -> kill
+    expectancy_floor: float = -0.15  # rolling expectancy below this -> trip
+    # Backtest only: after a trip, pause this long then resume (live stays permanent).
+    kill_resume_hours: float = 168.0  # 7 days
 
     # strategy: trend_mtf (4H bias + 15m timing), momentum_15, or regime_breakout
     strategy: str = "trend_mtf"
@@ -76,11 +64,11 @@ class Config:
     h4_ema_fast: int = 20
     h4_ema_slow: int = 50
     h4_adx_min_short: float = 20.0  # shorts need stronger 4H trend confirmation
-    ema_entry_period: int = 20      # 15m EMA for pullback / resume timing
-    rsi_rule_min: float = 70.0      # momentum_rule: RSI must exceed this
-    btc_adx_min: float = 0.0        # chop filter: skip all entries when BTC ADX below this (0 = off)
-    breadth_min: float = 0.0        # chop filter: need |share of coins trending| >= this, same side
-    pullback_lookback: int = 4      # bars to look back for a touch of ema_entry
+    ema_entry_period: int = 20  # 15m EMA for pullback / resume timing
+    rsi_rule_min: float = 70.0  # momentum_rule: RSI must exceed this
+    btc_adx_min: float = 0.0  # chop filter: skip all entries when BTC ADX below this (0 = off)
+    breadth_min: float = 0.0  # chop filter: need |share of coins trending| >= this, same side
+    pullback_lookback: int = 4  # bars to look back for a touch of ema_entry
     breakout_lookback: int = 18
     volume_lookback: int = 20
     volume_multiplier: float = 1.4
@@ -100,14 +88,14 @@ class Config:
 
     # quality filters (raise win rate: fewer fake breakouts)
     rsi_period: int = 14
-    rsi_long_max: float = 70.0   # block longs when RSI already extended
+    rsi_long_max: float = 70.0  # block longs when RSI already extended
     rsi_short_min: float = 30.0  # block shorts when RSI already extended
     require_rsi_veto: bool = False  # hunt-optional; stacking with squeeze/BTC starved samples
     bb_period: int = 20
     bb_std: float = 2.0
     kc_period: int = 20
     kc_atr_mult: float = 1.5
-    squeeze_lookback: int = 8    # squeeze must have fired within this many bars
+    squeeze_lookback: int = 8  # squeeze must have fired within this many bars
     require_squeeze: bool = False
     require_btc_regime: bool = True
 
@@ -155,8 +143,11 @@ class Config:
         if int(self.live_history_bars) <= 0:
             # Defined in data.py; lazy to avoid config↔data import cycle.
             from moonshot.data import live_history_bars_for_tf
+
             object.__setattr__(
-                self, "live_history_bars", live_history_bars_for_tf(self.timeframe),
+                self,
+                "live_history_bars",
+                live_history_bars_for_tf(self.timeframe),
             )
 
     @property
@@ -190,6 +181,7 @@ class Config:
             streak_losses=int(os.getenv("STREAK_LOSSES", "5")),
             streak_pause_hours=float(os.getenv("STREAK_PAUSE_HOURS", "48")),
             expectancy_floor=float(os.getenv("EXPECTANCY_FLOOR", "-0.15")),
+            kill_resume_hours=float(os.getenv("KILL_RESUME_HOURS", "168")),
             enable_pyramiding=os.getenv("ENABLE_PYRAMIDING", "1") == "1",
             enable_partial=os.getenv("ENABLE_PARTIAL", "1") == "1",
             partial_at_r=float(os.getenv("PARTIAL_AT_R", "1.0")),
@@ -244,5 +236,3 @@ def setup_logging(level: str = "INFO") -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
-
-
