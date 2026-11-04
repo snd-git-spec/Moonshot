@@ -25,7 +25,7 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
+
 
 class Direction(str, Enum):
     LONG = "long"

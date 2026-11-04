@@ -25,13 +25,10 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
+from moonshot.types import (
+    DataError, _pandas_tf,
+)
+
 from moonshot.paths import ROOT, CACHE_DIR
 
 
@@ -480,63 +477,99 @@ def estimate_range_bars(tf: str, start, end, *, warmup_bars: int = 0) -> int:
     return int((fetch_end - fetch_start).total_seconds() * 1000 // step_ms) + 2
 
 
+def estimate_range_fetch_bars(
+    tf: str,
+    start,
+    end,
+    *,
+    source: str = RANGE_SOURCE_MEXC,
+    warmup_bars: int = 0,
+) -> int:
+    """Bars that must actually be downloaded (native/base TF if ``tf`` is resampled).
+
+    MEXC has no native 3m — Auto used to accept ~17k of 3m then die fetching
+    ~52k of 1m. Cap checks must use this fetch cost, not the post-resample count.
+    """
+    tf = str(tf).strip().lower()
+    src = _normalize_range_source(source)
+    warm = int(warmup_bars) if int(warmup_bars) > 0 else range_warmup_bars(tf)
+    base = _resample_base_tf(tf, source=src)
+    if base is None:
+        return estimate_range_bars(tf, start, end, warmup_bars=warm)
+    ratio = max(1, int(timeframe_ms(tf) // timeframe_ms(base)))
+    return estimate_range_bars(base, start, end, warmup_bars=warm * ratio)
+
+
 def pick_range_timeframe(
     start,
     end,
     preferred: str,
     *,
     max_bars: int = _MAX_RANGE_BARS,
+    source: str = RANGE_SOURCE_MEXC,
 ) -> tuple[str, int, str]:
-    """Pick the densest candle size that still fits ``max_bars`` for the window.
+    """Pick densest TF at or finer than ``preferred`` that fits ``max_bars``.
 
-    Walks ``RANGE_TF_LADDER`` fine→coarse and returns the first TF whose
-    estimated bar count is ≤ ``max_bars`` (maximizes candles in that calendar
-    span). ``preferred`` is the book TF — used in the note when Auto differs.
-    Returns ``(timeframe, estimated_bars, note)``.
+    Never silently coarsens past the book TF — a coarser candle size is a
+    different strategy. If the book window is over the fetch cap, returns
+    ``preferred`` with an over-cap note so the UI can refuse the run.
+    Returns ``(timeframe, estimated_result_bars, note)``.
     """
     preferred = str(preferred).strip().lower() or "15m"
+    src = _normalize_range_source(source)
     ladder = list(RANGE_TF_LADDER)
     if preferred not in ladder:
         ladder = sorted(set(ladder + [preferred]), key=lambda t: timeframe_ms(t))
-    # Entire ladder fine→coarse — maximize candle count under the cap.
-    candidates = sorted(set(ladder), key=lambda t: timeframe_ms(t))
+    pref_ms = timeframe_ms(preferred)
+    # Fine→coarse, but never coarser than the book.
+    candidates = sorted(
+        {tf for tf in ladder if timeframe_ms(tf) <= pref_ms},
+        key=lambda t: timeframe_ms(t),
+    )
+    if not candidates:
+        candidates = [preferred]
 
-    rejected: list[tuple[str, int]] = []
+    rejected: list[tuple[str, int, int]] = []
     for tf in candidates:
         warm = range_warmup_bars(tf)
-        n = estimate_range_bars(tf, start, end, warmup_bars=warm)
-        if 0 < n <= int(max_bars):
+        n_out = estimate_range_bars(tf, start, end, warmup_bars=warm)
+        n_fetch = estimate_range_fetch_bars(
+            tf, start, end, source=src, warmup_bars=warm,
+        )
+        if 0 < n_fetch <= int(max_bars) and n_out > 0:
             note = ""
             if tf != preferred:
                 why = ""
                 if rejected:
-                    prev_tf, prev_n = rejected[-1]
-                    why = f" {prev_tf} would be ~{prev_n:,} bars (over cap)."
-                # Finer than book = packing more candles; coarser = forced by cap.
-                if timeframe_ms(tf) < timeframe_ms(preferred):
-                    note = (
-                        f"Auto packed denser candles {preferred} → {tf} "
-                        f"(~{n:,} bars in this window, cap {int(max_bars):,})."
-                        f"{why}"
-                    )
-                else:
-                    note = (
-                        f"Auto raised candles {preferred} → {tf} "
-                        f"(~{n:,} bars in this window, cap {int(max_bars):,})."
-                        f"{why}"
-                    )
-            return tf, n, note
-        if n > int(max_bars):
-            rejected.append((tf, n))
+                    prev_tf, prev_out, prev_fetch = rejected[-1]
+                    base = _resample_base_tf(prev_tf, source=src)
+                    if base and prev_fetch > int(max_bars):
+                        why = (
+                            f" {prev_tf} needs ~{prev_fetch:,} {base} bars to build "
+                            f"(over cap {int(max_bars):,})."
+                        )
+                    else:
+                        why = f" {prev_tf} would be ~{prev_out:,} bars (over cap)."
+                note = (
+                    f"Auto packed denser candles {preferred} → {tf} "
+                    f"(~{n_out:,} bars in this window, fetch cap {int(max_bars):,})."
+                    f"{why}"
+                )
+            return tf, n_out, note
+        if n_fetch > int(max_bars) or n_out > int(max_bars):
+            rejected.append((tf, n_out, n_fetch))
 
-    tf = candidates[-1]
-    warm = range_warmup_bars(tf)
-    n = estimate_range_bars(tf, start, end, warmup_bars=warm)
-    note = (
-        f"Even {tf} needs ~{n:,} bars (cap {int(max_bars):,}). "
-        "Narrow the date range."
+    warm = range_warmup_bars(preferred)
+    n = estimate_range_bars(preferred, start, end, warmup_bars=warm)
+    n_fetch = estimate_range_fetch_bars(
+        preferred, start, end, source=src, warmup_bars=warm,
     )
-    return tf, n, note
+    note = (
+        f"Book {preferred} needs ~{max(n, n_fetch):,} download bars "
+        f"(cap {int(max_bars):,}). Shorten the date range — "
+        "Auto will not switch to a coarser timeframe."
+    )
+    return preferred, n, note
 
 
 def fetch_yahoo_ohlcv_range(
@@ -787,7 +820,18 @@ def fetch_historical_range(
         )
 
     est_bars = int((fetch_end - fetch_start).total_seconds() * 1000 // step_ms) + 2
-    if est_bars > _MAX_RANGE_BARS:
+    # Cap against download size (native/base TF), not post-resample candle count.
+    est_fetch = estimate_range_fetch_bars(
+        tf, t0, t1, source=src, warmup_bars=warm,
+    )
+    if est_fetch > _MAX_RANGE_BARS:
+        base_tf = _resample_base_tf(tf, source=src)
+        if base_tf and base_tf != tf:
+            raise DataError(
+                f"range too large for {symbol} {tf}: needs ~{est_fetch:,} {base_tf} bars "
+                f"to build (max {_MAX_RANGE_BARS:,}). Auto should pick a coarser TF — "
+                f"or choose 5m+ / narrow the dates."
+            )
         raise DataError(
             f"range too large for {symbol} {tf}: ~{est_bars:,} bars "
             f"(max {_MAX_RANGE_BARS:,}). Narrow the window or use a higher timeframe."

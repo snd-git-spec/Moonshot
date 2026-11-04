@@ -129,5 +129,7 @@
         "mean": 0.1995485203105542
       }
     }
-  ]
+  ],
+  "offline_research": true,
+  "note": "Offline discover.py atom search \u2014 not the live/paper hunt book."
 }

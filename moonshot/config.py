@@ -25,9 +25,11 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
+from moonshot.types import (
+    ConfigError,
+    _pandas_tf,
+)
+
 from moonshot.paths import ENV_PATH
 try:
     from dotenv import load_dotenv

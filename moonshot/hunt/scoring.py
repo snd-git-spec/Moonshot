@@ -25,35 +25,28 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
-import moonshot.data as _moonshot_data
-pull(_moonshot_data, globals())
-import moonshot.strategy as _moonshot_strategy
-pull(_moonshot_strategy, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
-import moonshot.risk as _moonshot_risk
-pull(_moonshot_risk, globals())
-import moonshot.portfolio as _moonshot_portfolio
-pull(_moonshot_portfolio, globals())
-import moonshot.brokers as _moonshot_brokers
-pull(_moonshot_brokers, globals())
-import moonshot.persist as _moonshot_persist
-pull(_moonshot_persist, globals())
-import moonshot.backtest as _moonshot_backtest
-pull(_moonshot_backtest, globals())
-import moonshot.live as _moonshot_live
-pull(_moonshot_live, globals())
-import moonshot.symbols as _moonshot_symbols
-pull(_moonshot_symbols, globals())
-import moonshot.hunt.constants as _moonshot_hunt_constants
-pull(_moonshot_hunt_constants, globals())
+from moonshot.config import (
+    Config,
+)
+from moonshot.features import (
+    adx, prepare_data,
+)
+from moonshot.backtest import (
+    BacktestEngine,
+    BacktestResult,
+)
+from moonshot.hunt.constants import (
+    HUNT_BREAKOUT_N,
+    HUNT_EXPLORE_N,
+    HUNT_LEV_BREAKOUT,
+    HUNT_LEV_FORCE,
+    HUNT_LEV_POLISH,
+    HUNT_STRATEGIES,
+    HUNT_TARGETS,
+    HUNT_TF_ALLOW,
+    _lev_slip_stress,
+)
+
 from moonshot.paths import (
     ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
     PAPER_RUNTIME_PATH, RULES_PATH,
@@ -217,6 +210,32 @@ RESEARCH_MIN_OOS_RET_EDGE = 0.008
 POST_PROMOTE_HUNT_PAUSE_SEC = 5
 # Pending paper entry older than this many bars is dropped (no late fantasy fills).
 PEND_ENTRY_MAX_BARS = 2
+# If paper has not closed a trade for this long, hunt may rotate to a different
+# tradeable book even when it does not beat the champion holdout week. Otherwise
+# a ghost +40% week champion can freeze Live on zero setups indefinitely.
+PAPER_SILENCE_ROTATE_HOURS = 6.0
+
+
+def _paper_idle_hours() -> float:
+    """Hours since last closed paper trade (DB). Large number if none."""
+    try:
+        con = sqlite3.connect(str(DB_PATH))
+        try:
+            row = con.execute(
+                "SELECT ts FROM trades WHERE mode = 'paper' ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            con.close()
+        if not row or not row[0]:
+            return 999.0
+        last = pd.Timestamp(row[0])
+        if last.tzinfo is None:
+            last = last.tz_localize("UTC")
+        else:
+            last = last.tz_convert("UTC")
+        return float((pd.Timestamp.now(tz="UTC") - last).total_seconds() / 3600.0)
+    except Exception:
+        return 0.0
 
 
 def _cfg_fingerprint(cfg: Config) -> tuple:
@@ -738,8 +757,9 @@ RECENT_DAYS = 90
 RECENT_MIN_TRADES = 12
 RECENT_EXP_FLOOR = -0.25   # climb-friendly; deep bleed still flagged, mild drag OK
 
-# Primary money window the user cares about
-WEEK_DAYS = 7
+# Primary money holdout (calendar days frozen out of fit / scored for promote).
+# 14d > old 7d — more trades / power before research promote.
+WEEK_DAYS = 14
 
 
 def _window_eval(data: dict, cfg: Config, days: int,
@@ -792,7 +812,7 @@ def _recent_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) ->
 
 
 def _week_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) -> dict:
-    """PRIMARY: hard + soft P&L over the last 7 calendar days."""
+    """PRIMARY: hard + soft P&L over the last WEEK_DAYS calendar days."""
     week_min = int(HUNT_TARGETS.get("week_min_trades", 2))
     hard = _window_eval(
         data, cfg, WEEK_DAYS, end=end, soft=False,

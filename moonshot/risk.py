@@ -25,13 +25,12 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
+from moonshot.types import (
+    Direction, InstrumentSpec, RiskDecision,
+)
+from moonshot.config import (
+    Config,
+)
 
 class RiskEngine:
     """Single gatekeeper for new risk. Time always comes from the caller (backtest-safe)."""
@@ -52,6 +51,66 @@ class RiskEngine:
         self.rolling_r: list = []
         self.kill_switch_active = False
         self.halt_reason = ""
+        # Paper-vs-backtest drift band (set from champion / last improve)
+        self.drift_min_trades = 20
+        self.drift_exp_floor = -0.20
+        self.drift_soft_slack = 0.30  # paper soft ret may sit this far under backtest soft
+        self.backtest_soft_ret: Optional[float] = None
+        self.backtest_week_ret: Optional[float] = None
+        self.drift_halt = False
+
+    def set_backtest_band(
+        self,
+        *,
+        soft_ret: Optional[float] = None,
+        week_ret: Optional[float] = None,
+        min_trades: int = 20,
+        exp_floor: float = -0.20,
+        soft_slack: float = 0.30,
+    ) -> None:
+        """Anchor paper drift checks to the promoted book's backtest numbers."""
+        self.backtest_soft_ret = None if soft_ret is None else float(soft_ret)
+        self.backtest_week_ret = None if week_ret is None else float(week_ret)
+        self.drift_min_trades = max(5, int(min_trades))
+        self.drift_exp_floor = float(exp_floor)
+        self.drift_soft_slack = float(soft_slack)
+
+    def check_paper_drift(
+        self,
+        *,
+        n_trades: int,
+        paper_exp: float,
+        paper_ret: Optional[float] = None,
+    ) -> bool:
+        """Kill new entries when paper drifts outside the backtest band.
+
+        Returns True if a drift halt was tripped (or was already active).
+        """
+        if self.drift_halt or self.kill_switch_active:
+            return True
+        if int(n_trades) < int(self.drift_min_trades):
+            return False
+        reasons: list[str] = []
+        if float(paper_exp) < float(self.drift_exp_floor):
+            reasons.append(
+                f"paper exp {float(paper_exp):+.2f}R < floor {self.drift_exp_floor:+.2f}R"
+            )
+        if (
+            paper_ret is not None
+            and self.backtest_soft_ret is not None
+            and float(paper_ret) < float(self.backtest_soft_ret) - float(self.drift_soft_slack)
+        ):
+            reasons.append(
+                f"paper ret {float(paper_ret):+.0%} << backtest soft "
+                f"{float(self.backtest_soft_ret):+.0%} "
+                f"(slack {self.drift_soft_slack:.0%})"
+            )
+        if not reasons:
+            return False
+        why = "paper drift: " + "; ".join(reasons)
+        self.drift_halt = True
+        self._kill(why)
+        return True
 
     def update_equity(self, equity: float, ts: pd.Timestamp) -> None:
         equity = max(equity, 0.0)

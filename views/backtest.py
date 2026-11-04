@@ -645,32 +645,38 @@ if price_source != ms.RANGE_SOURCE_MEXC:
         "Historic spot prices — not identical to MEXC USDT-M; for research windows only."
     )
 
-# ---- Candle size: long windows need coarser bars to stay under the fetch cap ----
+# ---- Candle size: default is the live book; Auto never coarsens past it ----
 _book_tf = str(cfg0.timeframe).strip().lower()
+_book_choice = f"Book default ({_book_tf})"
 _yahoo_locked = price_source == ms.RANGE_SOURCE_YAHOO
 _tf_choices = (
     ["1d"]
     if _yahoo_locked
     else [
-        "Auto (fit window)",
-        f"Book default ({_book_tf})",
+        _book_choice,
+        "Auto (denser only)",
         *[tf for tf in ms.RANGE_TF_LADDER if tf != _book_tf],
     ]
 )
 if "bt_lab_candle_mode" not in st.session_state:
-    st.session_state["bt_lab_candle_mode"] = "Auto (fit window)"
+    st.session_state["bt_lab_candle_mode"] = _book_choice
 if _yahoo_locked:
     st.session_state["bt_lab_candle_mode"] = "1d"
-elif st.session_state.get("bt_lab_candle_mode") == "1d" and "1d" not in _tf_choices:
-    # Leaving Yahoo: restore Auto so we don't stick on a bare "1d" that is also
-    # in the ladder but without the Auto/Book options selected.
-    st.session_state["bt_lab_candle_mode"] = "Auto (fit window)"
+else:
+    _cur = st.session_state.get("bt_lab_candle_mode")
+    if _cur == "1d" and "1d" not in _tf_choices:
+        st.session_state["bt_lab_candle_mode"] = _book_choice
+    elif _cur == "Auto (fit window)":
+        # Old label silently coarsened; pin to book so we don't lie again.
+        st.session_state["bt_lab_candle_mode"] = _book_choice
+    elif isinstance(_cur, str) and _cur.startswith("Book default") and _cur != _book_choice:
+        st.session_state["bt_lab_candle_mode"] = _book_choice
 
 section_header(
     "Candles",
-    "Yahoo is daily-only; other sources Auto-pick densest TF under the bar cap"
+    "Yahoo is daily-only"
     if _yahoo_locked
-    else "Auto picks the densest candle size that still fits under the bar cap",
+    else f"Default = live book ({_book_tf}). Auto may pack denser bars; it will not coarsen.",
 )
 candle_mode = st.selectbox(
     "Candle size",
@@ -681,8 +687,9 @@ candle_mode = st.selectbox(
         if _yahoo_locked
         else (
             f"Range fetch caps at {ms.MAX_RANGE_BARS:,} bars/symbol (incl. warmup). "
-            "Auto chooses the finest TF (most candles) for your dates that still fits — "
-            "including 2h between 1h and 4h."
+            f"Book default always uses {_book_tf}. Auto only tries finer TFs that still "
+            "fit — it refuses to raise to a coarser size. Pick 15m/30m/… yourself if you "
+            "want a coarse research run."
         )
     ),
 )
@@ -693,44 +700,60 @@ _preview_end = _utc_day_end_exclusive(end_date) if start_date < end_date else No
 _run_tf = _book_tf
 _tf_note = ""
 _est_bars = 0
+_est_fetch = 0
 if _preview_start is not None and _preview_end is not None:
     if _yahoo_locked:
         _run_tf = "1d"
+        _warm = ms.range_warmup_bars(_run_tf)
         _est_bars = ms.estimate_range_bars(
-            _run_tf, _preview_start, _preview_end,
-            warmup_bars=ms.range_warmup_bars(_run_tf),
+            _run_tf, _preview_start, _preview_end, warmup_bars=_warm,
         )
+        _est_fetch = _est_bars
         _tf_note = "Yahoo Finance Backtest source is locked to 1d (spot USD)."
     elif candle_mode.startswith("Auto"):
         _run_tf, _est_bars, _tf_note = ms.pick_range_timeframe(
-            _preview_start, _preview_end, _book_tf,
+            _preview_start, _preview_end, _book_tf, source=price_source,
+        )
+        _est_fetch = ms.estimate_range_fetch_bars(
+            _run_tf, _preview_start, _preview_end,
+            source=price_source, warmup_bars=ms.range_warmup_bars(_run_tf),
         )
     elif candle_mode.startswith("Book default"):
         _run_tf = _book_tf
+        _warm = ms.range_warmup_bars(_run_tf)
         _est_bars = ms.estimate_range_bars(
-            _run_tf, _preview_start, _preview_end,
-            warmup_bars=ms.range_warmup_bars(_run_tf),
+            _run_tf, _preview_start, _preview_end, warmup_bars=_warm,
         )
-        if _est_bars > ms.MAX_RANGE_BARS:
+        _est_fetch = ms.estimate_range_fetch_bars(
+            _run_tf, _preview_start, _preview_end,
+            source=price_source, warmup_bars=_warm,
+        )
+        if _est_fetch > ms.MAX_RANGE_BARS:
             _tf_note = (
-                f"Book {_book_tf} needs ~{_est_bars:,} bars "
-                f"(cap {ms.MAX_RANGE_BARS:,}). Switch to Auto or a higher TF."
+                f"Book {_book_tf} needs ~{_est_fetch:,} download bars "
+                f"(cap {ms.MAX_RANGE_BARS:,}). Shorten the dates, or pick a coarser "
+                "TF yourself if you want a research run (not the live book)."
             )
     else:
         _run_tf = str(candle_mode).strip().lower()
+        _warm = ms.range_warmup_bars(_run_tf)
         _est_bars = ms.estimate_range_bars(
-            _run_tf, _preview_start, _preview_end,
-            warmup_bars=ms.range_warmup_bars(_run_tf),
+            _run_tf, _preview_start, _preview_end, warmup_bars=_warm,
         )
-        if _est_bars > ms.MAX_RANGE_BARS:
+        _est_fetch = ms.estimate_range_fetch_bars(
+            _run_tf, _preview_start, _preview_end,
+            source=price_source, warmup_bars=_warm,
+        )
+        if _est_fetch > ms.MAX_RANGE_BARS:
             _tf_note = (
-                f"{_run_tf} needs ~{_est_bars:,} bars "
-                f"(cap {ms.MAX_RANGE_BARS:,}). Pick Auto or a coarser candle."
+                f"{_run_tf} needs ~{_est_fetch:,} download bars "
+                f"(cap {ms.MAX_RANGE_BARS:,}). Shorten the dates or pick a coarser candle."
             )
         elif _run_tf != _book_tf:
             _tf_note = f"Replaying book logic on {_run_tf} candles (book default is {_book_tf})."
 
-    _ok = 0 < _est_bars <= ms.MAX_RANGE_BARS
+    # Cap uses download size (3m is built from 1m on MEXC).
+    _ok = 0 < int(_est_fetch) <= ms.MAX_RANGE_BARS
     _src_short = ms.RANGE_SOURCE_LABELS.get(price_source, price_source)
     st.caption(
         f"**{_src_short}** · ~{_est_bars:,} {_run_tf} candles "
@@ -762,29 +785,42 @@ if run:
     # Resolve candle TF for this run (same rules as the live preview).
     if price_source == ms.RANGE_SOURCE_YAHOO:
         run_tf = "1d"
-        est_bars = ms.estimate_range_bars(
-            run_tf, win_start, win_end, warmup_bars=ms.range_warmup_bars(run_tf),
-        )
+        warm = ms.range_warmup_bars(run_tf)
+        est_bars = ms.estimate_range_bars(run_tf, win_start, win_end, warmup_bars=warm)
+        est_fetch = est_bars
         tf_note = "Yahoo Finance · 1d spot USD"
     elif candle_mode.startswith("Auto"):
-        run_tf, est_bars, tf_note = ms.pick_range_timeframe(win_start, win_end, _book_tf)
+        run_tf, est_bars, tf_note = ms.pick_range_timeframe(
+            win_start, win_end, _book_tf, source=price_source,
+        )
+        est_fetch = ms.estimate_range_fetch_bars(
+            run_tf, win_start, win_end,
+            source=price_source, warmup_bars=ms.range_warmup_bars(run_tf),
+        )
     elif candle_mode.startswith("Book default"):
         run_tf = _book_tf
-        est_bars = ms.estimate_range_bars(
-            run_tf, win_start, win_end, warmup_bars=ms.range_warmup_bars(run_tf),
+        warm = ms.range_warmup_bars(run_tf)
+        est_bars = ms.estimate_range_bars(run_tf, win_start, win_end, warmup_bars=warm)
+        est_fetch = ms.estimate_range_fetch_bars(
+            run_tf, win_start, win_end, source=price_source, warmup_bars=warm,
         )
         tf_note = ""
     else:
         run_tf = str(candle_mode).strip().lower()
-        est_bars = ms.estimate_range_bars(
-            run_tf, win_start, win_end, warmup_bars=ms.range_warmup_bars(run_tf),
+        warm = ms.range_warmup_bars(run_tf)
+        est_bars = ms.estimate_range_bars(run_tf, win_start, win_end, warmup_bars=warm)
+        est_fetch = ms.estimate_range_fetch_bars(
+            run_tf, win_start, win_end, source=price_source, warmup_bars=warm,
         )
         tf_note = ""
 
-    if est_bars > ms.MAX_RANGE_BARS:
+    if est_fetch > ms.MAX_RANGE_BARS:
         st.error(
-            f"Too many candles (~{est_bars:,} at {run_tf}; cap {ms.MAX_RANGE_BARS:,}). "
-            "Use Auto, pick a higher timeframe, or shorten the date range."
+            f"Too many download bars (~{est_fetch:,} for {run_tf}; "
+            f"cap {ms.MAX_RANGE_BARS:,}/symbol). "
+            "Shorten the date range, or manually pick a coarser candle for research. "
+            "Auto will not leave the book timeframe. "
+            "(3m is built from 1m, so it can blow the cap even when 3m candle count looks fine.)"
         )
         st.stop()
 

@@ -25,37 +25,38 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
-import moonshot.data as _moonshot_data
-pull(_moonshot_data, globals())
-import moonshot.strategy as _moonshot_strategy
-pull(_moonshot_strategy, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
-import moonshot.risk as _moonshot_risk
-pull(_moonshot_risk, globals())
-import moonshot.portfolio as _moonshot_portfolio
-pull(_moonshot_portfolio, globals())
-import moonshot.brokers as _moonshot_brokers
-pull(_moonshot_brokers, globals())
-import moonshot.persist as _moonshot_persist
-pull(_moonshot_persist, globals())
-import moonshot.backtest as _moonshot_backtest
-pull(_moonshot_backtest, globals())
-import moonshot.live as _moonshot_live
-pull(_moonshot_live, globals())
-import moonshot.symbols as _moonshot_symbols
-pull(_moonshot_symbols, globals())
+from moonshot.types import (
+    BotError, ConfigError,
+)
+from moonshot.config import (
+    Config, setup_logging,
+)
+from moonshot.features import (
+    prepare_data,
+)
+from moonshot.data import (
+    fetch_historical, synthetic_ohlcv,
+)
+from moonshot.brokers import (
+    BaseBroker, MarketData, MexcBroker, PaperBroker,
+)
+from moonshot.backtest import (
+    results_table, run_grid, verdicts,
+)
+from moonshot.symbols import (
+    DEFAULT_SYMBOLS, PAPER_SYMBOLS,
+)
+from moonshot.live import (
+    LiveRunner,
+)
+from moonshot.selftest import (
+    selftest,
+)
+from moonshot.hunt.autopilot import (
+    cmd_autopilot,
+)
+
 from moonshot.paths import ROOT, ENV_PATH
-from moonshot.selftest import selftest
-from moonshot.hunt.autopilot import cmd_autopilot, PaperSupervisor  # noqa: F401
-from moonshot.hunt.improve import improve_once  # noqa: F401
 
 def cmd_backtest(args: argparse.Namespace) -> None:
     cfg = Config.from_env()
@@ -89,7 +90,11 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 def _live_runner(live: bool, symbols: list) -> LiveRunner:
     cfg = Config.from_env()
     market = MarketData(cfg)
-    broker: BaseBroker = MexcBroker(cfg) if live else PaperBroker(cfg)
+    if live:
+        # Honors MEXC_DRY_RUN=1 (default in .env.example) — no live orders until verified.
+        broker = MexcBroker(cfg)
+    else:
+        broker = PaperBroker(cfg)
     return LiveRunner(cfg, broker, market, symbols, live)
 
 

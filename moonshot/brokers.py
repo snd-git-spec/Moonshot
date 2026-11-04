@@ -25,11 +25,16 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
+from moonshot.types import (
+    BrokerPosition, ConfigError, DataError, Direction, ExecutionError, Fill,
+    InstrumentSpec,
+)
+from moonshot.config import (
+    Config,
+)
+from moonshot.data import (
+    _OHLCV_LOCK, fetch_historical, ohlcv_to_frame, paged_ohlcv, public_exchange, timeframe_ms,
+)
 
 class BaseBroker:
     """Quantities are BASE units; brokers convert to exchange contracts internally."""
@@ -143,14 +148,54 @@ class PaperBroker(BaseBroker):
 
 class MexcBroker(BaseBroker):
     """
-    Live MEXC USDT-perp adapter via CCXT.  *** UNVERIFIED AGAINST THE LIVE API ***
-    Before trusting it: run with the minimum size, and check each order type, the
-    leverage/openType params, trigger-order cancellation and balance field against
-    the current ccxt `mexc` docs. Points to verify are marked VERIFY.
+    Live MEXC USDT-perp adapter via CCXT.
+
+    Set ``MEXC_DRY_RUN=1`` (or ``dry_run=True``) to log intended API calls without
+    sending orders — required for CI and local rehearsal. Live path still needs
+    human verification of VERIFY notes against current CCXT/MEXC docs before
+    ``LIVE_TRADING_ENABLED=1``.
+
+    VERIFY audit (code intent — re-check before live):
+    - openType=1 → isolated margin (MEXC swap convention in CCXT)
+    - opening orders pass leverage + openType; reduceOnly omits them
+    - stops use stopLossPrice + reduceOnly market trigger
+    - cancel_order uses params trigger=True for conditional orders
+    - balance total.USDT should include uPnL on swap accounts (confirm on account)
+    - contractSize / amount_to_precision for lot sizing
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(
+        self,
+        cfg: Config,
+        *,
+        dry_run: Optional[bool] = None,
+        exchange: Any = None,
+        api_fail_halt: int = 5,
+    ):
         self.cfg = cfg
+        self.dry_run = (
+            bool(dry_run)
+            if dry_run is not None
+            else os.getenv("MEXC_DRY_RUN", "0").strip() == "1"
+        )
+        self._lev: dict = {}
+        self._stop_id: dict = {}
+        self._call_log: list[dict] = []
+        self._api_fails = 0
+        self._api_fail_halt = max(1, int(api_fail_halt))
+        self._halted = False
+        self._n = 0
+
+        if exchange is not None:
+            self.ex = exchange
+            return
+
+        if self.dry_run:
+            # No network / no keys — parametric dry-run for CI and rehearsal.
+            self.ex = None
+            log.warning("MexcBroker DRY-RUN — orders are logged, not sent")
+            return
+
         try:
             import ccxt  # type: ignore
         except ImportError as e:
@@ -158,21 +203,60 @@ class MexcBroker(BaseBroker):
         key, secret = os.getenv("MEXC_API_KEY"), os.getenv("MEXC_API_SECRET")
         if not key or not secret:
             raise ConfigError("MEXC_API_KEY / MEXC_API_SECRET not set")
-        self.ex = ccxt.mexc({"apiKey": key, "secret": secret, "enableRateLimit": True,
-                             "options": {"defaultType": "swap"}})
+        # Never log key/secret values.
+        self.ex = ccxt.mexc({
+            "apiKey": key,
+            "secret": secret,
+            "enableRateLimit": True,
+            "options": {"defaultType": "swap"},
+        })
         self.ex.load_markets()
-        self._lev: dict = {}
-        self._stop_id: dict = {}
+
+    def _record(self, op: str, **payload) -> None:
+        row = {"op": op, **payload}
+        self._call_log.append(row)
+        if self.dry_run:
+            log.info("MEXC dry-run %s %s", op, {k: v for k, v in payload.items() if k != "secret"})
+
+    def _api(self, op: str, fn):
+        """Run a live CCXT call with consecutive-failure circuit breaker."""
+        if self._halted:
+            raise ExecutionError(
+                f"MEXC API halted after {self._api_fail_halt} consecutive failures"
+            )
+        try:
+            out = fn()
+            self._api_fails = 0
+            return out
+        except Exception as e:  # noqa: BLE001
+            self._api_fails += 1
+            if self._api_fails >= self._api_fail_halt:
+                self._halted = True
+                log.error(
+                    "MEXC API circuit open after %d failures on %s: %s",
+                    self._api_fails, op, e,
+                )
+            raise
 
     def _contracts(self, symbol: str, qty: float) -> float:
+        if self.ex is None:
+            # Dry-run: treat 1 base unit = 1 contract step.
+            return float(max(qty, 0.0))
         m = self.ex.market(symbol)
         size = float(m.get("contractSize") or 1.0)
         return float(self.ex.amount_to_precision(symbol, qty / size))
 
     def set_leverage(self, symbol, leverage) -> None:
         self._lev[symbol] = leverage
+        params = {"openType": 1}  # VERIFY: isolated
+        self._record("set_leverage", symbol=symbol, leverage=leverage, params=params)
+        if self.dry_run:
+            return
         try:
-            self.ex.set_leverage(leverage, symbol, params={"openType": 1})  # VERIFY isolated
+            self._api(
+                "set_leverage",
+                lambda: self.ex.set_leverage(leverage, symbol, params=params),
+            )
         except Exception as e:  # noqa: BLE001
             raise ExecutionError(f"set_leverage failed: {e}") from e
 
@@ -181,26 +265,60 @@ class MexcBroker(BaseBroker):
         if amount <= 0:
             raise ExecutionError("order size rounds to zero contracts")
         params: dict = {"reduceOnly": reduce_only}
-        if not reduce_only:  # VERIFY: MEXC swap requires leverage + openType on opening orders
-            params.update({"leverage": self._lev.get(symbol, self.cfg.leverage), "openType": 1})
+        if not reduce_only:  # VERIFY: leverage + openType on opening orders
+            params.update({
+                "leverage": self._lev.get(symbol, self.cfg.leverage),
+                "openType": 1,
+            })
+        self._record(
+            "create_order",
+            symbol=symbol, side=side, amount=amount, ref_price=ref_price, params=dict(params),
+        )
+        if self.dry_run:
+            self._n += 1
+            px = float(ref_price)
+            fee = px * float(qty) * self.cfg.fee_taker
+            return Fill(
+                f"dry-{self._n}", symbol, side, float(qty), px, fee,
+                pd.Timestamp.now(tz="UTC"),
+            )
         try:
-            raw = self.ex.create_order(symbol, "market", side, amount, None, params)
+            raw = self._api(
+                "create_order",
+                lambda: self.ex.create_order(symbol, "market", side, amount, None, params),
+            )
         except Exception as e:  # noqa: BLE001
             raise ExecutionError(f"market order failed: {e}") from e
         size = float(self.ex.market(symbol).get("contractSize") or 1.0)
         px = float(raw.get("average") or raw.get("price") or ref_price)
         fee = float((raw.get("fee") or {}).get("cost") or px * qty * self.cfg.fee_taker)
-        return Fill(str(raw["id"]), symbol, side, float(raw.get("filled") or amount) * size,
-                    px, fee, pd.Timestamp.now(tz="UTC"))
+        return Fill(
+            str(raw["id"]), symbol, side, float(raw.get("filled") or amount) * size,
+            px, fee, pd.Timestamp.now(tz="UTC"),
+        )
 
     def set_stop(self, symbol, direction, qty, stop) -> None:
         self.cancel_stop(symbol)
         side = "sell" if direction is Direction.LONG else "buy"
         amount = self._contracts(symbol, qty)
-        try:  # VERIFY: stopLossPrice trigger-market params on MEXC swap
-            raw = self.ex.create_order(symbol, "market", side, amount, None,
-                                       {"stopLossPrice": float(self.ex.price_to_precision(symbol, stop)),
-                                        "reduceOnly": True})
+        if self.ex is None:
+            stop_px = float(stop)
+        else:
+            stop_px = float(self.ex.price_to_precision(symbol, stop))
+        params = {"stopLossPrice": stop_px, "reduceOnly": True}  # VERIFY trigger-market
+        self._record(
+            "set_stop", symbol=symbol, side=side, amount=amount, params=dict(params),
+        )
+        if self.dry_run:
+            self._stop_id[symbol] = f"dry-stop-{symbol}"
+            return
+        try:
+            raw = self._api(
+                "set_stop",
+                lambda: self.ex.create_order(
+                    symbol, "market", side, amount, None, params,
+                ),
+            )
         except Exception as e:  # noqa: BLE001
             raise ExecutionError(f"stop placement failed: {e}") from e
         self._stop_id[symbol] = raw.get("id")
@@ -209,14 +327,23 @@ class MexcBroker(BaseBroker):
         oid = self._stop_id.pop(symbol, None)
         if not oid:
             return
-        try:  # VERIFY: MEXC can return success with no body; ccxt may raise anyway
-            self.ex.cancel_order(oid, symbol, params={"trigger": True})
+        self._record("cancel_stop", symbol=symbol, order_id=oid)
+        if self.dry_run:
+            return
+        try:  # VERIFY: trigger=True for conditional; empty body may still raise
+            self._api(
+                "cancel_stop",
+                lambda: self.ex.cancel_order(oid, symbol, params={"trigger": True}),
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("cancel_stop(%s) raised %s - check for orphaned stop orders!", symbol, e)
 
     def get_position(self, symbol) -> Optional[BrokerPosition]:
+        self._record("fetch_positions", symbol=symbol)
+        if self.dry_run:
+            return None
         try:
-            raws = self.ex.fetch_positions([symbol])
+            raws = self._api("fetch_positions", lambda: self.ex.fetch_positions([symbol]))
         except Exception as e:  # noqa: BLE001
             raise ExecutionError(f"fetch_positions failed: {e}") from e
         size = float(self.ex.market(symbol).get("contractSize") or 1.0)
@@ -228,9 +355,13 @@ class MexcBroker(BaseBroker):
         return None
 
     def get_equity(self) -> float:
+        self._record("fetch_balance")
+        if self.dry_run:
+            return float(self.cfg.starting_equity)
         try:
-            bal = self.ex.fetch_balance()
-            return float(bal["total"]["USDT"])  # VERIFY: should include unrealized PnL
+            bal = self._api("fetch_balance", lambda: self.ex.fetch_balance())
+            # VERIFY: total USDT includes unrealized PnL on swap
+            return float(bal["total"]["USDT"])
         except Exception as e:  # noqa: BLE001
             raise ExecutionError(f"fetch_balance failed: {e}") from e
 

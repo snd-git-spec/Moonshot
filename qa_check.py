@@ -32,11 +32,11 @@ def main() -> int:
     except Exception as e:
         bad(f"pgrep failed: {e}")
         out = ""
-    if "-m moonshot autopilot" in out:
+    if "python -m moonshot autopilot" in out:
         ok("autopilot process running")
     else:
         bad("autopilot process NOT running")
-    if "-m moonshot paper" in out:
+    if "python -m moonshot paper" in out:
         ok("paper process running")
     else:
         bad("paper process NOT running")

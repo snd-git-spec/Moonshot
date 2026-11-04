@@ -25,37 +25,52 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
-import moonshot.data as _moonshot_data
-pull(_moonshot_data, globals())
-import moonshot.strategy as _moonshot_strategy
-pull(_moonshot_strategy, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
-import moonshot.risk as _moonshot_risk
-pull(_moonshot_risk, globals())
-import moonshot.portfolio as _moonshot_portfolio
-pull(_moonshot_portfolio, globals())
-import moonshot.brokers as _moonshot_brokers
-pull(_moonshot_brokers, globals())
-import moonshot.persist as _moonshot_persist
-pull(_moonshot_persist, globals())
-import moonshot.backtest as _moonshot_backtest
-pull(_moonshot_backtest, globals())
-import moonshot.live as _moonshot_live
-pull(_moonshot_live, globals())
-import moonshot.symbols as _moonshot_symbols
-pull(_moonshot_symbols, globals())
-import moonshot.hunt.constants as _moonshot_hunt_constants
-pull(_moonshot_hunt_constants, globals())
-import moonshot.hunt.scoring as _moonshot_hunt_scoring
-pull(_moonshot_hunt_scoring, globals())
+from moonshot.types import (
+    DataError,
+)
+from moonshot.config import (
+    Config,
+)
+from moonshot.features import (
+    _btc_symbol_in, adx, prepare_data,
+)
+from moonshot.data import (
+    RANGE_SOURCE_MEXC,
+)
+from moonshot.persist import (
+    Persistence,
+)
+from moonshot.hunt.constants import (
+    HUNT_CHAMPION_STALE_PP,
+    HUNT_SCOUT_TOP,
+    HUNT_SEARCH_SYMBOLS,
+    HUNT_SOFT_BUDGET,
+    HUNT_STRATEGIES,
+    HUNT_STUCK_HELD,
+    HUNT_TARGETS,
+    HUNT_WF_DAYS,
+    _cfg_to_env_updates,
+    _cfg_to_knobs,
+    _hunt_bars_for_tf,
+    _hunt_calendar_days,
+    _hunt_fetch_raw,
+    _hunt_fetch_wf_raw,
+    _hunt_price_source,
+    _live_feed,
+    _load_autopilot_state,
+    _patch_env,
+    _save_autopilot_state,
+    _utc_now,
+    _week_delta_needed,
+)
+from moonshot.hunt.scoring import (
+    PAPER_SILENCE_ROTATE_HOURS, RESEARCH_MIN_WEEK_EDGE, RESEARCH_PROMOTE_MIN_SEC, WEEK_DAYS, _beats, _candidate_cfgs,
+    _cfg_fingerprint, _champion_from_history, _dedupe_cfgs, _discover_seed_cfgs, _eval_cfg, _eval_soft_oos,
+    _forward_record, _freeze_risk, _grade, _held_streak, _hunt_search_mode, _is_climb_ok,
+    _is_screenable, _is_valid_candidate, _leverage_ladder_cfgs, _material_research_edge, _paper_idle_hours, _prepare_cached,
+    _rank_key, _recent_eval, _week_eval, _wf_eval, _wf_msg,
+)
+
 from moonshot.paths import (
     ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
     PAPER_RUNTIME_PATH, RULES_PATH,
@@ -537,6 +552,9 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
     leverage_ladder: list = []
     confirm_hits = 0
     confirm_rejects = {"climb": 0, "consider": 0, "err": 0}
+    # Screenable confirm books kept for silence_rotate even when climb/_consider lose
+    # to a high holdout-week champion (Live can sit idle while hunt HOLDs forever).
+    rotate_pool: list = []
     seen_soft = set()
     for _wr, _wn, _rk, cand, _sci, _sco in shortlist:
         if soft_runs >= soft_budget:
@@ -557,6 +575,18 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             log.warning("confirm soft failed: %s", e)
             confirm_rejects["err"] += 1
             continue
+        if _is_screenable(ci, co):
+            try:
+                cweek_r = _week_eval(data, cand, end=t1)
+                rotate_pool.append((
+                    float(cweek_r.get("ret") or -999),
+                    int(cweek_r.get("trades") or 0),
+                    int(cweek_r.get("soft_trades") or 0),
+                    _rank_key(ci, co, cs),
+                    cand, ci, co, cs, cweek_r,
+                ))
+            except Exception:
+                pass
         if not _is_climb_ok(ci, co, cs, base_i, base_o):
             confirm_rejects["climb"] += 1
             continue
@@ -624,9 +654,69 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             ),
         )
 
-    # F4 finalist: re-score holdout week on FULL paper symbol book before research promote
-    best_wf_ok = (not wf_enabled) or bool(best_wf and best_wf.get("ok"))
+    # ---- Silence rotate: paper idle → deploy a different tradeable book ----
+    # Auto-improve must *test* approaches on paper, not only backtest against a
+    # frozen high holdout-week champion that produces zero live setups.
+    silence_rotate = False
+    idle_h = float(_paper_idle_hours())
     week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
+    if (
+        best_cfg is base
+        and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
+        and held >= 3
+        and rotate_pool
+    ):
+        base_fp = _cfg_fingerprint(base)
+        # Prefer denser week activity, then week return, then fit rank.
+        rotate_pool.sort(key=lambda r: (r[1] + r[2], r[0], r[3]), reverse=True)
+        for _wr, wn, wsn, _rk, cand, ci, co, cs, cweek in rotate_pool:
+            if _cfg_fingerprint(cand) == base_fp:
+                continue
+            if int(wn) < week_min and int(wsn) < week_min:
+                continue
+            if not _is_screenable(ci, co):
+                continue
+            cwf = _wf_for(cand) if wf_enabled else None
+            if wf_enabled and not (cwf and cwf.get("ok")):
+                continue
+            best_cfg, best_i, best_o, best_soft, best_wf = cand, ci, co, cs, cwf
+            best_week = cweek
+            best_recent = _recent_eval(
+                _prepare_cached(_raw_for_tf(str(cand.timeframe)) or raw, cand, feat_cache),
+                cand, end=t1,
+            )
+            best_grade = _grade(
+                ci, co, cs, cwf, wf_required=True, fwd=fwd, fwd_required=True, week=cweek,
+            )
+            best_grade["recent"] = best_recent
+            best_grade["week"] = cweek
+            promote_reason = "silence_rotate"
+            silence_rotate = True
+            log.info(
+                "silence rotate · paper idle %.1fh · deploying %s %sx@%s week=%+.0f%% n=%d "
+                "(champion holdout no longer freezes Live)",
+                idle_h, cand.strategy, int(cand.leverage), cand.timeframe,
+                float(cweek.get("ret") or 0) * 100, int(wn),
+            )
+            break
+        if not silence_rotate:
+            log.info(
+                "silence rotate skipped · idle %.1fh but no alternate screenable book in pool (%d)",
+                idle_h, len(rotate_pool),
+            )
+    elif best_cfg is base and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS):
+        log.info(
+            "silence rotate armed · paper idle %.1fh · held=%d pool=%d (need held>=3 + pool)",
+            idle_h, held, len(rotate_pool),
+        )
+
+    # F4 finalist: re-score holdout week on FULL paper symbol book before research promote
+    require_wf = bool(HUNT_TARGETS.get("require_walk_forward", True))
+    best_wf_ok = bool(best_wf and best_wf.get("ok"))
+    # Normal promote needs WF green; silence_rotate may proceed without it.
+    wf_gate_ok = best_wf_ok if (require_wf and wf_enabled) else (
+        (not wf_enabled) or best_wf_ok
+    )
     best_week_active = (
         int(best_week.get("trades") or 0) >= week_min
         or int(best_week.get("soft_trades") or 0) >= week_min
@@ -699,7 +789,12 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
 
     best_week_ret_now = float(best_week.get("ret") or 0)
     # Never research-promote below the (possibly stale-adjusted) champion floor
-    if best_cfg is not base and best_week_ret_now + 0.001 < champ_week_floor:
+    # (silence_rotate is the escape hatch when Live is idle under that floor).
+    if (
+        not silence_rotate
+        and best_cfg is not base
+        and best_week_ret_now + 0.001 < champ_week_floor
+    ):
         material_ok = False
         material_why = (
             f"below champion week {champ_week_floor:+.0%} "
@@ -708,14 +803,47 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
 
     research_improved = (
         best_cfg is not base
-        and _is_climb_ok(best_i, best_o, best_soft, base_i, base_o)
-        and (best_wf_ok or not wf_enabled)
-        and not best_grade.get("kill_illusion")
         and best_week_active
-        and material_ok
         and promote_cooled
-        and best_week_ret_now + 0.001 >= champ_week_floor
+        and (
+            # Idle paper must rotate even if the alternate fails kill-illusion /
+            # climb gates — otherwise a silent champion freezes Live forever.
+            silence_rotate
+            or (
+                wf_gate_ok
+                and not best_grade.get("kill_illusion")
+                and _is_climb_ok(best_i, best_o, best_soft, base_i, base_o)
+                and material_ok
+                and best_week_ret_now + 0.001 >= champ_week_floor
+            )
+        )
     )
+    if (
+        not silence_rotate
+        and best_cfg is not base
+        and require_wf
+        and (not wf_enabled or not best_wf_ok)
+        and research_improved is False
+        and material_ok
+    ):
+        if not wf_enabled:
+            material_why = "walk-forward unavailable — promote blocked"
+        elif not best_wf_ok:
+            material_why = f"walk-forward fail ({(best_wf or {}).get('why', 'no')})"
+    if silence_rotate and research_improved:
+        material_ok = True
+        material_why = f"silence_rotate idle={idle_h:.1f}h"
+        log.info(
+            "silence rotate promote locked in · %s %sx@%s week=%+.0f%%",
+            best_cfg.strategy, int(best_cfg.leverage), best_cfg.timeframe,
+            best_week_ret_now * 100,
+        )
+    elif silence_rotate and not research_improved:
+        log.warning(
+            "silence rotate selected a book but promote gates still blocked it "
+            "(active=%s cooled=%s wf=%s) — check week_min",
+            best_week_active, promote_cooled, wf_gate_ok,
+        )
     if best_cfg is not base and not research_improved:
         log.info(
             "climb found but no research promote (%s) · week %+0.f%%→%+0.f%% score %s→%s",
@@ -740,8 +868,9 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 "knobs": _cfg_to_knobs(best_cfg),
             }
             _save_autopilot_state(state)
-    # Finalist honesty on full book (max calendar under bar cap)
-    if research_improved and len(full_symbols) > len(symbols):
+    # Finalist honesty on full book (max calendar under bar cap).
+    # Skip for silence_rotate — that path exists to break Live free now.
+    if research_improved and len(full_symbols) > len(symbols) and not silence_rotate:
         try:
             f_raw = _hunt_fetch_raw(
                 full_symbols, best_cfg.timeframe, "finalist",
@@ -797,6 +926,72 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         except Exception as e:
             log.warning("finalist full-book recheck failed: %s — keeping search promote", e)
 
+    # A1: research venue (often Binance spot) ≠ MEXC perps — gate .env on MEXC holdout.
+    transfer_gap: Optional[dict] = None
+    if (
+        research_improved
+        and bool(HUNT_TARGETS.get("require_mexc_transfer_ok", True))
+        and str(hunt_src) != str(RANGE_SOURCE_MEXC)
+    ):
+        spot_ret = float(best_week.get("ret") or 0)
+        try:
+            mexc_syms = list(full_symbols) if full_symbols else list(symbols)
+            mexc_raw = _hunt_fetch_raw(
+                mexc_syms[: max(len(symbols), 1)],
+                best_cfg.timeframe,
+                hunt_tier,
+                refresh=False,
+                source=RANGE_SOURCE_MEXC,
+            )
+            if not mexc_raw:
+                raise RuntimeError("MEXC transfer fetch empty")
+            mexc_data = prepare_data(mexc_raw, best_cfg)
+            mexc_t1 = max(sd.bars[-1].Index for sd in mexc_data.values())
+            mexc_week = _week_eval(mexc_data, best_cfg, end=mexc_t1)
+            mexc_ret = float(mexc_week.get("ret") or 0)
+            transfer_gap = {
+                "research_source": str(hunt_src),
+                "research_ret": spot_ret,
+                "mexc_ret": mexc_ret,
+                "mexc_trades": int(mexc_week.get("trades") or 0),
+                "mexc_span": mexc_week.get("span"),
+            }
+            log.info(
+                "transfer gap · %s holdout %+.0f%% n=%d → MEXC %+.0f%% n=%d",
+                hunt_src, spot_ret * 100, int(best_week.get("trades") or 0),
+                mexc_ret * 100, int(mexc_week.get("trades") or 0),
+            )
+            if mexc_ret <= 0.0 and spot_ret > 0.0:
+                research_improved = False
+                material_why = (
+                    f"MEXC holdout {mexc_ret:+.0%} ≤ 0 while research "
+                    f"({hunt_src}) {spot_ret:+.0%} — refuse .env patch"
+                )
+                log.warning("transfer gate blocked promote: %s", material_why)
+            else:
+                # Prefer MEXC number for Live messaging when transfer clears.
+                best_week = {
+                    **best_week,
+                    "ret": mexc_week.get("ret"),
+                    "soft_ret": mexc_week.get("soft_ret"),
+                    "final": mexc_week.get("final"),
+                    "trades": mexc_week.get("trades"),
+                    "soft_trades": mexc_week.get("soft_trades"),
+                    "span": mexc_week.get("span"),
+                    "transfer_ok": True,
+                }
+                best_grade["week"] = best_week
+                best_grade["week_return"] = best_week.get("ret")
+        except Exception as e:
+            research_improved = False
+            material_why = f"MEXC transfer check failed: {e}"
+            log.warning("transfer gate blocked promote: %s", material_why)
+            transfer_gap = {
+                "research_source": str(hunt_src),
+                "research_ret": spot_ret,
+                "error": str(e),
+            }
+
     improved = bool(research_improved)  # research tier → .env
     promote_tier = "research" if improved else "hold"
     # F3: confirmed / elite requires forward paper proof
@@ -827,6 +1022,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         "hunt_tier": hunt_tier,
         "hunt_days": int(hunt_days),
         "hunt_bars_est": int(bars),
+        "transfer_gap": transfer_gap,
         "leverage_ladder": leverage_ladder,
         "baseline": {
             "train_exp": round(base_i.expectancy_r, 3),
@@ -874,7 +1070,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
 
     best_recent_ok = bool(best_recent.get("ok"))
     week_msg = (
-        f"holdout7d ${float(best_week.get('final') or 0):.0f} "
+        f"holdout{int(WEEK_DAYS)}d ${float(best_week.get('final') or 0):.0f} "
         f"({float(best_week.get('ret') or 0):+.0%}, "
         f"soft {float(best_week.get('soft_ret') or 0):+.0%}, "
         f"n={int(best_week.get('trades') or 0)}, {best_week.get('span', '')})"
@@ -926,7 +1122,7 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
             f"win {best_o.win_rate:.0%}, n={best_o.trades}; "
             f"tried {tested} · {hold_why}. "
             + ("TARGETS MET — waiting forward proof." if best_grade["targets_met"]
-               else "Still hunting holdout 7d toward +100%.")
+               else f"Still hunting holdout {int(WEEK_DAYS)}d toward +100%.")
             + f" [{_wf_msg(best_wf)}]"
         )
         log.info("AUTOPILOT HOLD: %s", decision["message"])
@@ -992,11 +1188,12 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
         decision["promote_tier"] = "confirmed"
         state["forward_since"] = decision["ts"]
 
-    # Champion floor: only raise, never lower. History rebuild already ran at pass start.
+    # Champion floor: only raise, never lower — except silence_rotate, which must
+    # replace a ghost high-week champion that left paper with zero live setups.
     if improved:
         new_week = float(best_week.get("ret") or 0)
         old_week = float((champion or {}).get("week_ret") or -999)
-        if new_week >= old_week - 0.0005:
+        if silence_rotate or new_week >= old_week - 0.0005:
             state["champion"] = {
                 "ts": decision["ts"],
                 "generation": generation,
@@ -1004,6 +1201,8 @@ def improve_once(symbols: list, bars: int = 5000, oos_frac: float = 0.3,
                 "score": raw_score,
                 "knobs": knobs,
                 "week": best_week,
+                **({"week_ret_peak": max(old_week, new_week),
+                    "silence_rotate": True} if silence_rotate else {}),
             }
         elif champion:
             state["champion"] = champion

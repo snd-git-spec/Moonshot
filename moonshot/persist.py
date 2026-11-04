@@ -25,11 +25,13 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
+from moonshot.types import (
+    TradeResult,
+)
+from moonshot.position import (
+    Position,
+)
+
 from moonshot.paths import ROOT, DB_PATH
 
 class Persistence:

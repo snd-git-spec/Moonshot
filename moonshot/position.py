@@ -25,11 +25,9 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
+from moonshot.types import (
+    AddRecord, Direction, ExitReason, Lot, RiskError, TradeResult,
+)
 
 @dataclass
 class Position:

@@ -67,8 +67,8 @@ EOF
 launchctl bootout "gui/$UID_NUM/com.cake.moonshot.autopilot" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cake.moonshot.dashboard" 2>/dev/null || true
 # Also clear any orphan processes
-pkill -f "-m moonshot autopilot" 2>/dev/null || true
-pkill -f "-m moonshot paper" 2>/dev/null || true
+pkill -f "python -m moonshot autopilot" 2>/dev/null || true
+pkill -f "python -m moonshot paper" 2>/dev/null || true
 pkill -f "streamlit run dashboard.py" 2>/dev/null || true
 sleep 1
 

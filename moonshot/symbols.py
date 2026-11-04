@@ -25,7 +25,7 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
+
 
 # Core majors (stable sample) + hot movers (ZEC-style explosions). Hunt/paper share the set.
 # Hot names can thin samples and spike DD — kept because dollar upside is the goal.

@@ -25,30 +25,55 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
-import moonshot.data as _moonshot_data
-pull(_moonshot_data, globals())
-import moonshot.strategy as _moonshot_strategy
-pull(_moonshot_strategy, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
-import moonshot.risk as _moonshot_risk
-pull(_moonshot_risk, globals())
-import moonshot.portfolio as _moonshot_portfolio
-pull(_moonshot_portfolio, globals())
-import moonshot.brokers as _moonshot_brokers
-pull(_moonshot_brokers, globals())
-import moonshot.persist as _moonshot_persist
-pull(_moonshot_persist, globals())
-import moonshot.backtest as _moonshot_backtest
-pull(_moonshot_backtest, globals())
+from moonshot.types import (
+    ActionKind, AddDecision, BotError, Direction, ExecutionError, ExitReason,
+    Signal,
+)
+from moonshot.config import (
+    Config,
+)
+from moonshot.features import (
+    _btc_symbol_in, _is_btc_symbol, _regime_to_trend, build_features,
+)
+from moonshot.data import (
+    clear_stale_live_caches, fetch_historical,
+)
+from moonshot.strategy import (
+    make_strategy,
+)
+from moonshot.position import (
+    Position,
+)
+from moonshot.risk import (
+    RiskEngine,
+)
+from moonshot.portfolio import (
+    PositionManager,
+)
+from moonshot.brokers import (
+    BaseBroker, MarketData, PaperBroker,
+)
+from moonshot.persist import (
+    Notifier,
+    Persistence,
+)
+
 from moonshot.paths import ROOT, DB_PATH, CACHE_DIR, PAPER_RUNTIME_PATH
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# Drop pending entries older than this many bars (also defined in hunt.scoring).
+PEND_ENTRY_MAX_BARS = 2
+
+
+def _live_feed(kind: str, message: str, **extra) -> None:
+    # Shared feed lives in hunt.constants; lazy import avoids live↔hunt cycle at load.
+    from moonshot.hunt.constants import _live_feed as _write_live_feed
+    _write_live_feed(kind, message, **extra)
+
 
 class LiveRunner:
     def __init__(self, cfg: Config, broker: BaseBroker, market: MarketData, symbols: list,
@@ -94,6 +119,27 @@ class LiveRunner:
             btc = _btc_symbol_in(symbols)
             if btc and symbols[0] != btc:
                 self.symbols = [btc] + [s for s in symbols if s != btc]
+        self._load_drift_band()
+
+    def _load_drift_band(self) -> None:
+        """Pull champion / last-improve soft+week returns for paper drift halt."""
+        try:
+            from moonshot.hunt.constants import _load_autopilot_state
+            state = _load_autopilot_state() or {}
+            champ = state.get("champion") or {}
+            li = state.get("last_improve") or {}
+            soft = champ.get("soft_ret")
+            if soft is None:
+                soft = (li.get("best") or {}).get("soft_return")
+            week = champ.get("week_ret")
+            if week is None:
+                week = (li.get("best") or {}).get("week_return")
+            self.risk.set_backtest_band(
+                soft_ret=None if soft is None else float(soft),
+                week_ret=None if week is None else float(week),
+            )
+        except Exception as e:
+            log.debug("drift band load skipped: %s", e)
 
     def _runtime_path(self) -> Path:
         return Path(self.cfg.db_path).resolve().parent / PAPER_RUNTIME_PATH.name
@@ -771,6 +817,23 @@ class LiveRunner:
             "reason": reason.value, "pnl": res.pnl, "r": res.r_multiple, "price": px,
         })
         self.risk.register_trade_result(res.r_multiple, ts)
+        # Paper drift vs promoted backtest band — halt new entries if far outside.
+        if not self.live and self.risk.rolling_r:
+            n = len(self.risk.rolling_r)
+            paper_exp = float(np.mean(self.risk.rolling_r))
+            start_eq = float(self.cfg.starting_equity) or 1.0
+            paper_ret = (float(self.risk.equity) / start_eq) - 1.0
+            if self.risk.check_paper_drift(
+                n_trades=n, paper_exp=paper_exp, paper_ret=paper_ret,
+            ):
+                try:
+                    _live_feed(
+                        "drift_halt",
+                        f"PAPER DRIFT HALT · {self.risk.halt_reason}",
+                        exp=paper_exp, ret=paper_ret, n=n,
+                    )
+                except Exception:
+                    pass
         # Longer cool-off after regime kills — stops open→kill→requeue loops
         cool_bars = int(self.cfg.cooldown_bars)
         if reason is ExitReason.REGIME_INVALID:

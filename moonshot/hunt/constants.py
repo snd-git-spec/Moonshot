@@ -25,33 +25,25 @@ import pandas as pd
 
 log = logging.getLogger("moonshot")
 
-from moonshot._pull import pull
-import moonshot.types as _moonshot_types
-pull(_moonshot_types, globals())
-import moonshot.config as _moonshot_config
-pull(_moonshot_config, globals())
-import moonshot.features as _moonshot_features
-pull(_moonshot_features, globals())
-import moonshot.data as _moonshot_data
-pull(_moonshot_data, globals())
-import moonshot.strategy as _moonshot_strategy
-pull(_moonshot_strategy, globals())
-import moonshot.position as _moonshot_position
-pull(_moonshot_position, globals())
-import moonshot.risk as _moonshot_risk
-pull(_moonshot_risk, globals())
-import moonshot.portfolio as _moonshot_portfolio
-pull(_moonshot_portfolio, globals())
-import moonshot.brokers as _moonshot_brokers
-pull(_moonshot_brokers, globals())
-import moonshot.persist as _moonshot_persist
-pull(_moonshot_persist, globals())
-import moonshot.backtest as _moonshot_backtest
-pull(_moonshot_backtest, globals())
-import moonshot.live as _moonshot_live
-pull(_moonshot_live, globals())
-import moonshot.symbols as _moonshot_symbols
-pull(_moonshot_symbols, globals())
+from moonshot.types import (
+    ConfigError,
+)
+from moonshot.config import (
+    Config,
+)
+from moonshot.data import (
+    RANGE_PRICE_SOURCES,
+    RANGE_SOURCE_BINANCE_SPOT,
+    RANGE_SOURCE_YAHOO,
+    _MAX_RANGE_BARS,
+    _as_utc_ts,
+    _normalize_range_source,
+    estimate_range_bars,
+    fetch_historical_range,
+    range_warmup_bars,
+    timeframe_ms,
+)
+
 from moonshot.paths import (
     ROOT, ENV_PATH, DB_PATH, AUTOPILOT_STATE, LIVE_FEED,
     PAPER_RUNTIME_PATH, RULES_PATH,
@@ -77,8 +69,8 @@ _SAFE_ENV_KEYS = {
     "ENABLE_TIME_STOP", "TIME_STOP_BARS", "TIME_STOP_MIN_R",
 }
 
-# Autopilot hunt targets — PRIMARY bar is 7-day return with leverage.
-# +100%/week is the real goal (compounded leveraged edge), not a stretch label.
+# Autopilot hunt targets — PRIMARY bar is holdout-window return with leverage.
+# +100%/holdout is the score goal (compounded leveraged edge), not a stretch label.
 HUNT_TARGETS = {
     "train_exp": 0.10,
     "test_exp": 0.08,
@@ -88,10 +80,9 @@ HUNT_TARGETS = {
     "win_rate": 0.60,     # PRIMARY quality bar — aim for consistent winners, not coin-flip
     "test_return": 0.50,     # secondary: long OOS context (NOT the weekly claim)
     "soft_return_floor": -0.30,
-    "week_return": 1.00,     # PRIMARY: +100% in last 7d on leveraged book
-    # Consider/promote gate — must be reachable on current books (live ~8–30/week).
-    # Score still prefers denser weeks via week_target_trades.
-    "week_min_trades": 6,
+    "week_return": 1.00,     # PRIMARY: +100% in holdout window on leveraged book
+    # Consider/promote gate — denser than old 6/7d so noise books don't promote.
+    "week_min_trades": 10,
     "week_target_trades": 40,
     "weekly_return_goal": 1.00,
     "week_stretch": 1.00,
@@ -99,6 +90,10 @@ HUNT_TARGETS = {
     "week_hard_floor": 0.25,
     # Reject classic kill illusion: hard quit-while-ahead while soft bleeds
     "block_kill_illusion": True,
+    # Refuse .env patch when research venue ≠ MEXC and MEXC holdout ≤ 0 while research > 0
+    "require_mexc_transfer_ok": True,
+    # Research promote requires walk-forward green (silence_rotate may bypass)
+    "require_walk_forward": True,
 }
 
 # Fast hunt knobs — more passes/hour beat giant slow batches for self-improve.
