@@ -146,6 +146,26 @@ HUNT_LEV_POLISH = (5, 7, 10)
 HUNT_LEV_BREAKOUT = (5, 7, 10, 15, 25)
 HUNT_LEV_FORCE = (5, 10, 15, 25)
 
+# Successive-halving + curriculum + banlist + champion rescue
+HUNT_HALVING_A_DAYS = 45  # cheap Stage A window on BTC
+HUNT_HALVING_A_KEEP = 24
+HUNT_HALVING_B_KEEP = 12
+HUNT_CURRICULUM_SYMBOLS = ("BTC/USDT:USDT", "ETH/USDT:USDT")
+HUNT_BANLIST_CAP = 5000
+HUNT_BAN_WEEK_FLOOR = -0.20  # week_ret below this → ban
+HUNT_CHAMP_TRAIL_PP = 0.30  # champ − live week ≥ 30pp
+HUNT_CHAMP_TRAIL_PASSES = 2  # consecutive passes before rescue
+
+
+def _hunt_soft_workers() -> int:
+    """Parallel soft-check workers (1–4). Default 2."""
+    try:
+        n = int(os.getenv("HUNT_SOFT_WORKERS", "2"))
+    except (TypeError, ValueError):
+        n = 2
+    return max(1, min(4, n))
+
+
 # Legacy names kept for Health / external imports (now derived from calendar).
 HUNT_SEARCH_BARS_15M = 4500
 HUNT_FULL_BARS_15M = 9000

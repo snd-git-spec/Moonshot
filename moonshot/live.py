@@ -1040,6 +1040,39 @@ class LiveRunner:
                         ret=paper_ret,
                         n=n,
                     )
+                # Policy-3: ask hunt to deploy champion; ban the drifted knobs.
+                with contextlib.suppress(Exception):
+                    from moonshot.hunt.constants import (
+                        _cfg_to_knobs,
+                        _load_autopilot_state,
+                        _save_autopilot_state,
+                        _utc_now,
+                    )
+                    from moonshot.hunt.scoring import _banlist_add, _cfg_fingerprint
+
+                    st = _load_autopilot_state()
+                    st["pending_champion_rescue"] = True
+                    st["last_drift"] = {
+                        "ts": _utc_now().isoformat(),
+                        "reason": str(self.risk.halt_reason or "drift"),
+                        "knobs_hash": repr(_cfg_fingerprint(self.cfg)),
+                        "paper_exp": float(paper_exp),
+                        "paper_ret": float(paper_ret),
+                        "n_trades": int(n),
+                    }
+                    _banlist_add(
+                        st,
+                        self.cfg,
+                        week_ret=float(paper_ret),
+                        reason="paper_drift",
+                    )
+                    # Keep knobs snapshot for debugging
+                    st["last_drift"]["knobs"] = _cfg_to_knobs(self.cfg)
+                    _save_autopilot_state(st)
+                    log.warning(
+                        "drift → pending_champion_rescue + banlist (%s)",
+                        self.risk.halt_reason,
+                    )
         # Longer cool-off after regime kills — stops open→kill→requeue loops
         cool_bars = int(self.cfg.cooldown_bars)
         if reason is ExitReason.REGIME_INVALID:

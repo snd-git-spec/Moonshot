@@ -22,15 +22,19 @@ from moonshot.backtest import (
     BacktestResult,
 )
 from moonshot.hunt.constants import (
+    HUNT_BANLIST_CAP,
+    HUNT_BAN_WEEK_FLOOR,
     HUNT_BREAKOUT_N,
     HUNT_EXPLORE_N,
     HUNT_LEV_BREAKOUT,
     HUNT_LEV_FORCE,
     HUNT_LEV_POLISH,
     HUNT_STRATEGIES,
+    HUNT_STUCK_HELD,
     HUNT_TARGETS,
     HUNT_TF_ALLOW,
     _lev_slip_stress,
+    _utc_now,
 )
 
 from moonshot.paths import (
@@ -293,6 +297,71 @@ def _cfg_fingerprint(cfg: Config) -> tuple:
     )
 
 
+def _ban_key(cfg: Config) -> str:
+    """Stable string key for loser banlist (same identity as fingerprint)."""
+    return repr(_cfg_fingerprint(cfg))
+
+
+def _banlist_set(state: dict) -> set[str]:
+    rows = state.get("banlist") or []
+    out: set[str] = set()
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if isinstance(row, dict) and row.get("hash"):
+            out.add(str(row["hash"]))
+        elif isinstance(row, str):
+            out.add(row)
+    return out
+
+
+def _banlist_add(state: dict, cfg: Config, *, week_ret: float, reason: str) -> None:
+    """Append a loser; FIFO cap HUNT_BANLIST_CAP."""
+    key = _ban_key(cfg)
+    rows = list(state.get("banlist") or [])
+    if not isinstance(rows, list):
+        rows = []
+    # de-dupe: refresh existing
+    rows = [r for r in rows if not (isinstance(r, dict) and str(r.get("hash")) == key)]
+    rows.append(
+        {
+            "hash": key,
+            "week_ret": round(float(week_ret), 4),
+            "reason": str(reason)[:120],
+            "ts": _utc_now().isoformat(),
+        }
+    )
+    if len(rows) > int(HUNT_BANLIST_CAP):
+        rows = rows[-int(HUNT_BANLIST_CAP) :]
+    state["banlist"] = rows
+
+
+def _should_ban_week(week: dict | None, *, kill_illusion: bool = False) -> tuple[bool, str]:
+    if kill_illusion:
+        return True, "kill_illusion"
+    if not week:
+        return False, ""
+    try:
+        wr = float(week.get("ret") or 0)
+    except (TypeError, ValueError):
+        return False, ""
+    if wr < float(HUNT_BAN_WEEK_FLOOR):
+        return True, f"week<{HUNT_BAN_WEEK_FLOOR:.0%}"
+    return False, ""
+
+
+def _filter_banned(cfgs: list, banned: set[str]) -> tuple[list, int]:
+    if not banned:
+        return list(cfgs), 0
+    kept, n = [], 0
+    for c in cfgs:
+        if _ban_key(c) in banned:
+            n += 1
+            continue
+        kept.append(c)
+    return kept, n
+
+
 def _champion_from_history(hist_rows: list, current: dict | None) -> dict | None:
     """Keep the highest holdout-week knobs ever seen — never let a wipe lower the floor."""
     best = dict(current) if isinstance(current, dict) and current.get("knobs") else None
@@ -367,18 +436,33 @@ def _material_research_edge(
     return False, "noise"
 
 
-def _hunt_search_mode(generation: int, held_streak: int, hunt: bool) -> str:
+def _hunt_search_mode(
+    generation: int,
+    held_streak: int,
+    hunt: bool,
+    *,
+    has_champion: bool = False,
+) -> str:
     """
-    polish = micro-nudges around current best.
-    explore = wider random (default when stuck a bit).
-    breakout = large jumps across filters/exits when held forever.
-    Aggressive: spend most passes exploring / breaking out of local peaks.
+    Target mix ≈ 70% polish / 20% explore / 10% breakout when a champion exists.
+    Without champion (or when stuck), lean explore then breakout.
     """
     if not hunt:
-        return "explore"
-    # Aggressive: breakout often, explore otherwise — almost never stay in polish
-    if held_streak >= 2 or (generation % 3 == 0):
+        return "polish"
+    stuck = int(held_streak) >= int(HUNT_STUCK_HELD)
+    # ~10% breakout: every 10th generation, or when deeply stuck
+    if stuck and (generation % 5 == 0):
         return "breakout"
+    if generation % 10 == 0:
+        return "breakout"
+    if has_champion and not stuck:
+        # ~20% explore: one of every five gens (plus ~10% breakout above)
+        if generation % 5 == 1:
+            return "explore"
+        return "polish"
+    # No champion / stuck: explore most of the time
+    if stuck or generation % 4 == 0:
+        return "explore"
     return "explore"
 
 
@@ -736,10 +820,15 @@ def _feature_cache_key(cfg: Config) -> tuple:
 
 
 def _prepare_cached(raw: dict, cfg: Config, cache: dict) -> dict:
+    """Feature prepare with hit/miss counters on cache['_stats']."""
+    stats = cache.setdefault("_stats", {"hits": 0, "misses": 0, "prepare_calls": 0})
     key = _feature_cache_key(cfg)
     hit = cache.get(key)
     if hit is not None:
+        stats["hits"] = int(stats.get("hits") or 0) + 1
         return hit
+    stats["misses"] = int(stats.get("misses") or 0) + 1
+    stats["prepare_calls"] = int(stats.get("prepare_calls") or 0) + 1
     data = prepare_data(raw, cfg)
     cache[key] = data
     return data
@@ -984,6 +1073,47 @@ def _week_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) -> d
         "goal": week_tgt,
         "days": WEEK_DAYS,
     }
+
+
+def _dual_week_eval(data: dict, cfg: Config, end: Optional[pd.Timestamp] = None) -> dict:
+    """Primary WEEK_DAYS + prior WEEK_DAYS (non-overlapping)."""
+    if end is None:
+        end = max(sd.bars[-1].Index for sd in data.values())
+    end = pd.Timestamp(end)
+    primary = _week_eval(data, cfg, end=end)
+    prior_end = end - pd.Timedelta(days=int(WEEK_DAYS))
+    week_min = int(HUNT_TARGETS.get("week_min_trades", 2))
+    prior_hard = _window_eval(
+        data,
+        cfg,
+        WEEK_DAYS,
+        end=prior_end,
+        soft=False,
+        min_trades=week_min,
+        exp_floor=-0.50,
+    )
+    primary["prior_ret"] = float(prior_hard.get("ret") or 0)
+    primary["prior_trades"] = int(prior_hard.get("trades") or 0)
+    primary["prior_ok"] = bool(prior_hard.get("ok"))
+    primary["prior_span"] = prior_hard.get("span")
+    primary["dual_ok"] = _dual_week_ok(primary)
+    return primary
+
+
+def _dual_week_ok(week: dict | None) -> bool:
+    """Promote/rescue: prior ≥ 0 OR both ≥ week_hard_floor; primary drives +100% stretch."""
+    if not week:
+        return False
+    hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+    week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
+    try:
+        primary = float(week.get("ret") or 0)
+        prior = float(week.get("prior_ret") or 0)
+    except (TypeError, ValueError):
+        return False
+    if primary >= week_tgt and prior >= 0.0:
+        return True
+    return primary >= hard_floor and prior >= hard_floor
 
 
 def _forward_record(symbols: list, since_iso: str) -> dict:

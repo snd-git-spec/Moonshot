@@ -27,6 +27,8 @@ except ImportError:
 class Config:
     # account
     starting_equity: float = 50.0
+    # Hunt/backtest research notional (paper Live uses starting_equity / STARTING_EQUITY).
+    research_starting_equity: float = 50.0
     aggressive_mode: bool = False
     leverage: int = 5  # 5x passed extensive IS/OOS; 10x failed OOS on same sample
     max_account_leverage: float = 5.0
@@ -168,6 +170,7 @@ class Config:
         lev = int(os.getenv("LEVERAGE", "5"))
         return cls(
             starting_equity=float(os.getenv("STARTING_EQUITY", "50.0")),
+            research_starting_equity=float(os.getenv("RESEARCH_STARTING_EQUITY", "50.0")),
             aggressive_mode=os.getenv("AGGRESSIVE_MODE", "0") == "1",
             leverage=lev,
             max_account_leverage=float(os.getenv("MAX_ACCOUNT_LEVERAGE", str(lev))),

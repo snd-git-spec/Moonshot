@@ -523,13 +523,15 @@ def _goals(grade: dict, targets: dict) -> list[dict]:
         start_eq = float(ms.Config.from_env().starting_equity)
     except Exception:
         pass
+    # Always scale $ off current STARTING_EQUITY — stored *_final values were
+    # computed at whatever start the hunt used (often $50) and go stale on reset.
     end_eq = start_eq * (1.0 + tret)
-    soft_eq = float(grade.get("soft_final") or start_eq * (1.0 + soft_ret))
+    soft_eq = start_eq * (1.0 + soft_ret)
 
     week = grade.get("week") or {}
     week_ret = float(week.get("ret") if week.get("ret") is not None else (grade.get("week_return") or 0))
     week_goal = float(targets.get("week_return", targets.get("weekly_return_goal", 1.0)))
-    week_final = float(week.get("final") or start_eq * (1.0 + week_ret))
+    week_final = start_eq * (1.0 + week_ret)
     week_span = str(week.get("span") or grade.get("week_span") or "last 7 days")
     week_n = int(week.get("trades") or 0)
 
@@ -763,16 +765,15 @@ def live_panel() -> None:
             if knobs.get("timeframe"):
                 tf = str(knobs["timeframe"])
                 break
-        oos_final = grade.get("oos_final") or elite.get("oos_final")
-        if oos_final is None:
-            oos_final = start_eq * (1.0 + test_return)
+        # Scale dollars from current STARTING_EQUITY; ignore hunt-era absolute finals.
+        oos_final = start_eq * (1.0 + test_return)
         week = grade.get("week") or elite.get("week") or {}
         week_ret = float(
             week.get("ret") if week.get("ret") is not None
             else (grade.get("week_return") or elite.get("week_return") or 0)
         )
         week_goal = float(targets.get("week_return", 1.0))
-        week_final = float(week.get("final") or grade.get("week_final") or start_eq * (1.0 + week_ret))
+        week_final = start_eq * (1.0 + week_ret)
         week_span = str(week.get("span") or grade.get("week_span") or "last 7 days")
         week_n = int(week.get("trades") or 0)
         # Actual paper wallet change over 7 days (if equity history exists)
@@ -971,8 +972,9 @@ def live_panel() -> None:
                     "label": "Last 7 days on this setup (history)",
                     "value": f"${week_final:,.0f}",
                     "hint": (
-                        f"{week_ret:+.0%} simulated from past candles · "
-                        f"goal ≥ {week_goal:.0%} · {week_n} trades in that week"
+                        f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
+                        f"simulated from past candles · goal ≥ {week_goal:.0%} · "
+                        f"{week_n} trades in that week"
                     ),
                     "tone": week_tone,
                 },

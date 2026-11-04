@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import Optional
 
@@ -26,6 +28,12 @@ from moonshot.persist import (
 )
 from moonshot.hunt.constants import (
     HUNT_CHAMPION_STALE_PP,
+    HUNT_CHAMP_TRAIL_PASSES,
+    HUNT_CHAMP_TRAIL_PP,
+    HUNT_CURRICULUM_SYMBOLS,
+    HUNT_HALVING_A_DAYS,
+    HUNT_HALVING_A_KEEP,
+    HUNT_HALVING_B_KEEP,
     HUNT_SCOUT_TOP,
     HUNT_SEARCH_SYMBOLS,
     HUNT_SOFT_BUDGET,
@@ -40,6 +48,7 @@ from moonshot.hunt.constants import (
     _hunt_fetch_raw,
     _hunt_fetch_wf_raw,
     _hunt_price_source,
+    _hunt_soft_workers,
     _live_feed,
     _load_autopilot_state,
     _patch_env,
@@ -52,14 +61,19 @@ from moonshot.hunt.scoring import (
     RESEARCH_MIN_WEEK_EDGE,
     RESEARCH_PROMOTE_MIN_SEC,
     WEEK_DAYS,
+    _banlist_add,
+    _banlist_set,
     _beats,
     _candidate_cfgs,
     _cfg_fingerprint,
     _champion_from_history,
     _dedupe_cfgs,
     _discover_seed_cfgs,
+    _dual_week_eval,
+    _dual_week_ok,
     _eval_cfg,
     _eval_soft_oos,
+    _filter_banned,
     _forward_record,
     _freeze_risk,
     _grade,
@@ -74,9 +88,11 @@ from moonshot.hunt.scoring import (
     _prepare_cached,
     _rank_key,
     _recent_eval,
+    _should_ban_week,
     _week_eval,
     _wf_eval,
     _wf_msg,
+    _window_eval,
 )
 
 from moonshot.paths import (
@@ -107,10 +123,15 @@ def improve_once(
     except ImportError:
         pass
     base = Config.from_env()
+    # Hunt evals use research notional; paper Live keeps STARTING_EQUITY.
+    research_eq = float(getattr(base, "research_starting_equity", 50.0) or 50.0)
+    base = replace(base, starting_equity=research_eq)
     mode = "HUNT" if hunt else "TUNE"
     state = _load_autopilot_state()
     held = _held_streak(state)
-    search_mode = _hunt_search_mode(generation, held, hunt)
+    champion_preview = state.get("champion") if isinstance(state.get("champion"), dict) else None
+    has_champion = bool(champion_preview and champion_preview.get("knobs"))
+    search_mode = _hunt_search_mode(generation, held, hunt, has_champion=has_champion)
     full_symbols = list(symbols)
     # BTC must be present for the altcoin regime gate
     if base.require_btc_regime and _btc_symbol_in(symbols) is None:
@@ -278,7 +299,7 @@ def improve_once(
     base_soft = _eval_soft_oos(base_data, base, split, end=fit_end)
     base_wf = _wf_for(base)
     base_recent = _recent_eval(base_data, base, end=t1)
-    base_week = _week_eval(base_data, base, end=t1)  # holdout last 7d
+    base_week = _dual_week_eval(base_data, base, end=t1)
     base_grade = _grade(
         base_i,
         base_o,
@@ -329,7 +350,7 @@ def improve_once(
         c_raw = _raw_for_tf(str(cand_cfg.timeframe)) or raw
         cdata = _prepare_cached(c_raw, cand_cfg, feat_cache)
         crecent = _recent_eval(cdata, cand_cfg, end=t1)
-        cweek = _week_eval(cdata, cand_cfg, end=t1)  # holdout only (last 7d)
+        cweek = _dual_week_eval(cdata, cand_cfg, end=t1)
         week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
         if (
             int(cweek.get("trades") or 0) < week_min
@@ -571,7 +592,16 @@ def improve_once(
         except Exception as e:
             log.warning("pending promote restore failed: %s", e)
 
+    # Prefer polish around champion knobs (neighborhood search), else live best.
     polish_base = best_cfg
+    if has_champion:
+        try:
+            polish_base = _knobs_to_cfg(champion_preview["knobs"])
+            polish_base = replace(polish_base, starting_equity=research_eq)
+        except Exception as e:
+            log.warning("champion polish base failed: %s", e)
+            polish_base = best_cfg
+
     tested = 0
     soft_runs = 0
     soft_budget = int(HUNT_SOFT_BUDGET.get(search_mode, 6))
@@ -579,8 +609,10 @@ def improve_once(
     if held >= int(HUNT_STUCK_HELD):
         soft_budget = max(soft_budget, 20)
         scout_top = max(scout_top, 24)
-    hard_pool: list = []
-    thin_pool: list = []
+    keep_a = max(int(HUNT_HALVING_A_KEEP), scout_top)
+    keep_b = max(int(HUNT_HALVING_B_KEEP), min(soft_budget, scout_top))
+
+    banned = _banlist_set(state)
     cand_list = _candidate_cfgs(
         polish_base,
         generation=generation,
@@ -588,7 +620,6 @@ def improve_once(
         search_mode=search_mode,
     )
     cand_list = list(cand_list) + _discover_seed_cfgs(polish_base, generation, held)
-    # Density seeds every pass — ADX28/squeeze books starve week samples
     denser = [
         replace(
             polish_base,
@@ -612,10 +643,77 @@ def improve_once(
         for cd in (0, 1, 2)
     ]
     cand_list = _dedupe_cfgs(polish_base, list(cand_list) + denser)
+    cand_list, banned_skipped = _filter_banned(cand_list, banned)
+    log.info(
+        "hunt search · mode=%s · candidates=%d · banned_skipped=%d · polish_from=%s",
+        search_mode,
+        len(cand_list),
+        banned_skipped,
+        "champion" if polish_base is not best_cfg else "live",
+    )
 
-    # ---- Stage 1: scout hard IS/OOS + week on BTC only (rank by week first) ----
+    # Curriculum book for Stage C soft-check (BTC+ETH ∩ confirm symbols)
+    curriculum = [s for s in HUNT_CURRICULUM_SYMBOLS if s in symbols] or list(symbols[:2])
+
+    def _curriculum_raw_for_tf(tf: str) -> dict:
+        full = _raw_for_tf(tf)
+        return {s: full[s] for s in curriculum if s in full}
+
+    # ---- Stage A: cheap BTC short-window week rank ----
+    stage_a: list = []
+    thin_a: list = []
     for cand in cand_list:
         tested += 1
+        try:
+            use_raw = _scout_raw_for_tf(cand.timeframe)
+            if not use_raw:
+                continue
+            data = _prepare_cached(use_raw, cand, feat_cache)
+            cheap = _window_eval(
+                data,
+                cand,
+                int(HUNT_HALVING_A_DAYS),
+                end=t1,
+                soft=False,
+                min_trades=max(2, int(HUNT_TARGETS.get("week_min_trades", 10)) // 2),
+                exp_floor=-0.75,
+            )
+            ci, co = _eval_cfg(data, cand, split, end=fit_end)
+        except Exception as e:
+            log.warning("stage A failed: %s", e)
+            continue
+        row = (
+            float(cheap.get("ret") or -999),
+            int(cheap.get("trades") or 0),
+            _rank_key(ci, co, None),
+            cand,
+            ci,
+            co,
+        )
+        if _is_screenable(ci, co):
+            stage_a.append(row)
+        else:
+            thin_a.append(row)
+        ban_w = {"ret": cheap.get("ret")}
+        do_ban, why_ban = _should_ban_week(ban_w)
+        if do_ban:
+            _banlist_add(state, cand, week_ret=float(cheap.get("ret") or 0), reason=f"A:{why_ban}")
+    if not stage_a and thin_a:
+        log.warning("stage A: no screenable books — using thin pool")
+        stage_a = thin_a
+    stage_a.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    short_a = stage_a[:keep_a]
+    log.info(
+        "halving A: tried %d · keep %d/%d (best cheap-week %+0.f%%)",
+        tested,
+        len(short_a),
+        keep_a,
+        (short_a[0][0] * 100) if short_a else 0,
+    )
+
+    # ---- Stage B: full scout window week on BTC ----
+    stage_b: list = []
+    for _wr, _wn, _rk, cand, _ci, _co in short_a:
         try:
             use_raw = _scout_raw_for_tf(cand.timeframe)
             if not use_raw:
@@ -624,81 +722,111 @@ def improve_once(
             ci, co = _eval_cfg(data, cand, split, end=fit_end)
             cweek_s = _week_eval(data, cand, end=t1)
         except Exception as e:
-            log.warning("scout candidate failed: %s", e)
+            log.warning("stage B failed: %s", e)
             continue
-        # Sort key: holdout week first (what we climb on), then fit rank
-        row = (
-            float(cweek_s.get("ret") or -999),
-            int(cweek_s.get("trades") or 0),
-            _rank_key(ci, co, None),
-            cand,
-            ci,
-            co,
+        do_ban, why_ban = _should_ban_week(cweek_s)
+        if do_ban:
+            _banlist_add(
+                state, cand, week_ret=float(cweek_s.get("ret") or 0), reason=f"B:{why_ban}"
+            )
+            continue
+        stage_b.append(
+            (
+                float(cweek_s.get("ret") or -999),
+                int(cweek_s.get("trades") or 0),
+                _rank_key(ci, co, None),
+                cand,
+                ci,
+                co,
+                cweek_s,
+            )
         )
-        if _is_screenable(ci, co):
-            hard_pool.append(row)
-        else:
-            thin_pool.append(row)
-    if not hard_pool and thin_pool:
-        log.warning("scout: no screenable books — promoting thin pool to confirm")
-        hard_pool = thin_pool
-    hard_pool.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
-    shortlist = hard_pool[: max(scout_top, soft_budget)]
+    stage_b.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    shortlist = stage_b[:keep_b]
     top_w = float(shortlist[0][0]) if shortlist else float("nan")
     log.info(
-        "funnel scout: tried %d on %s · %d screenable · %d → confirm (best scout week %+0.f%%)",
-        tested,
-        scout_symbols[0].split("/")[0] if scout_symbols else "?",
-        len(hard_pool),
+        "halving B: %d → keep %d (best scout week %+0.f%%)",
+        len(stage_b),
         len(shortlist),
         top_w * 100 if top_w == top_w else 0,
     )
 
-    # ---- Stage 2: multi-coin soft + week; only survivors may enter _consider ----
+    # ---- Stage C: curriculum soft-check (parallel) + dual-week ----
     leverage_ladder: list = []
     confirm_hits = 0
-    confirm_rejects = {"climb": 0, "consider": 0, "err": 0}
-    # Screenable confirm books kept for silence_rotate even when climb/_consider lose
-    # to a high holdout-week champion (Live can sit idle while hunt HOLDs forever).
+    confirm_rejects = {"climb": 0, "consider": 0, "err": 0, "dual": 0}
     rotate_pool: list = []
-    seen_soft = set()
-    for _wr, _wn, _rk, cand, _sci, _sco in shortlist:
-        if soft_runs >= soft_budget:
-            break
-        ck = id(cand)
-        if ck in seen_soft:
-            continue
-        seen_soft.add(ck)
-        try:
+    workers = _hunt_soft_workers()
+
+    _feat_lock = threading.Lock()
+
+    def _stage_c_one(cand: Config):
+        use_raw = _curriculum_raw_for_tf(cand.timeframe)
+        if not use_raw:
             use_raw = _raw_for_tf(cand.timeframe)
-            if not use_raw:
-                continue
+        if not use_raw:
+            raise RuntimeError("empty curriculum/confirm raw")
+        with _feat_lock:
             data = _prepare_cached(use_raw, cand, feat_cache)
-            ci, co = _eval_cfg(data, cand, split, end=fit_end)
-            cs = _eval_soft_oos(data, cand, split, end=fit_end)
-            soft_runs += 1
-        except Exception as e:
-            log.warning("confirm soft failed: %s", e)
-            confirm_rejects["err"] += 1
-            continue
-        if _is_screenable(ci, co):
+        ci, co = _eval_cfg(data, cand, split, end=fit_end)
+        cs = _eval_soft_oos(data, cand, split, end=fit_end)
+        cweek_r = _dual_week_eval(data, cand, end=t1)
+        return cand, ci, co, cs, cweek_r
+
+    to_soft = [row[3] for row in shortlist[:soft_budget]]
+    results_c: list = []
+    if workers <= 1 or len(to_soft) <= 1:
+        for cand in to_soft:
             try:
-                cweek_r = _week_eval(data, cand, end=t1)
-                rotate_pool.append(
-                    (
-                        float(cweek_r.get("ret") or -999),
-                        int(cweek_r.get("trades") or 0),
-                        int(cweek_r.get("soft_trades") or 0),
-                        _rank_key(ci, co, cs),
-                        cand,
-                        ci,
-                        co,
-                        cs,
-                        cweek_r,
-                    )
+                results_c.append(_stage_c_one(cand))
+                soft_runs += 1
+            except Exception as e:
+                log.warning("confirm soft failed: %s", e)
+                confirm_rejects["err"] += 1
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_stage_c_one, c): c for c in to_soft}
+            for fut in as_completed(futs):
+                try:
+                    results_c.append(fut.result())
+                    soft_runs += 1
+                except Exception as e:
+                    log.warning("confirm soft failed: %s", e)
+                    confirm_rejects["err"] += 1
+
+    for cand, ci, co, cs, cweek_r in results_c:
+        do_ban, why_ban = _should_ban_week(
+            cweek_r, kill_illusion=bool((co.halted or "").strip()) and False
+        )
+        # kill-illusion checked properly via climb gate / grade later
+        if do_ban:
+            _banlist_add(
+                state, cand, week_ret=float(cweek_r.get("ret") or 0), reason=f"C:{why_ban}"
+            )
+        if _is_screenable(ci, co):
+            rotate_pool.append(
+                (
+                    float(cweek_r.get("ret") or -999),
+                    int(cweek_r.get("trades") or 0),
+                    int(cweek_r.get("soft_trades") or 0),
+                    _rank_key(ci, co, cs),
+                    cand,
+                    ci,
+                    co,
+                    cs,
+                    cweek_r,
                 )
-            except Exception:
-                pass
+            )
+        primary_ret = float(cweek_r.get("ret") or 0)
+        week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
+        hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+        if (
+            not _dual_week_ok(cweek_r)
+            and primary_ret < week_tgt
+            and primary_ret < hard_floor
+        ):
+            confirm_rejects["dual"] += 1
+            continue
         if not _is_climb_ok(ci, co, cs, base_i, base_o):
             confirm_rejects["climb"] += 1
             continue
@@ -707,12 +835,18 @@ def improve_once(
         else:
             confirm_rejects["consider"] += 1
 
+    stats = feat_cache.get("_stats") or {}
     log.info(
-        "funnel confirm: soft-checked %d/%d · climbs accepted=%d · rejects %s",
+        "halving C: soft-checked %d/%d workers=%d · climbs=%d · rejects %s · "
+        "cache hits=%s prepare=%s · curriculum=%s",
         soft_runs,
         soft_budget,
+        workers,
         confirm_hits,
         confirm_rejects,
+        stats.get("hits"),
+        stats.get("prepare_calls"),
+        ",".join(s.split("/")[0] for s in curriculum),
     )
 
     # ---- Stage 3: leverage bake-off on multi-coin (always try _consider) ----
@@ -783,6 +917,20 @@ def improve_once(
     # frozen high holdout-week champion that produces zero live setups.
     silence_rotate = False
     idle_h = float(_paper_idle_hours())
+    # Fresh .env deploys (manual force / research promote) restart the idle clock
+    # so an empty trades table (idle≈999) cannot immediately rotate away the book.
+    _deploy_ts_candidates: list[str] = []
+    _man = state.get("manual_champion_deploy") or {}
+    if isinstance(_man, dict) and _man.get("ts"):
+        _deploy_ts_candidates.append(str(_man["ts"]))
+    if state.get("research_promote_at"):
+        _deploy_ts_candidates.append(str(state["research_promote_at"]))
+    for _dts in _deploy_ts_candidates:
+        try:
+            _since = (_utc_now() - pd.Timestamp(_dts)).total_seconds() / 3600.0
+            idle_h = min(idle_h, max(0.0, float(_since)))
+        except Exception:
+            pass
     week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
     if (
         best_cfg is base
@@ -848,6 +996,72 @@ def improve_once(
             held,
             len(rotate_pool),
         )
+
+    # ---- Policy-3 champion rescue: drift pending OR trail ≥30pp for 2 passes ----
+    champion_rescue = False
+    champ_week_live = None
+    if champion and champion.get("knobs"):
+        try:
+            ch_cfg = _knobs_to_cfg(champion["knobs"])
+            ch_raw = _raw_for_tf(str(ch_cfg.timeframe)) or raw
+            ch_data = _prepare_cached(ch_raw, ch_cfg, feat_cache)
+            ch_week = _dual_week_eval(ch_data, ch_cfg, end=t1)
+            champ_week_live = float(ch_week.get("ret") or 0)
+            live_week_now = float(base_week.get("ret") or 0)
+            trail_pp = champ_week_live - live_week_now
+            if trail_pp >= float(HUNT_CHAMP_TRAIL_PP):
+                state["champ_trail_streak"] = int(state.get("champ_trail_streak") or 0) + 1
+            else:
+                state["champ_trail_streak"] = 0
+            pending_drift = bool(state.get("pending_champion_rescue"))
+            trail_ready = int(state.get("champ_trail_streak") or 0) >= int(HUNT_CHAMP_TRAIL_PASSES)
+            hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+            dual_ok = _dual_week_ok(ch_week) or champ_week_live >= hard_floor
+            ch_wf = _wf_for(ch_cfg) if wf_enabled else {"ok": True}
+            wf_ok_rescue = (not wf_enabled) or bool(ch_wf and ch_wf.get("ok"))
+            if (
+                best_cfg is base
+                and (pending_drift or trail_ready)
+                and dual_ok
+                and wf_ok_rescue
+                and champ_week_live >= hard_floor
+                and _cfg_fingerprint(ch_cfg) != _cfg_fingerprint(base)
+            ):
+                ci, co = _eval_cfg(ch_data, ch_cfg, split, end=fit_end)
+                cs = _eval_soft_oos(ch_data, ch_cfg, split, end=fit_end)
+                best_cfg, best_i, best_o, best_soft, best_wf = ch_cfg, ci, co, cs, ch_wf
+                best_week = ch_week
+                best_recent = _recent_eval(ch_data, ch_cfg, end=t1)
+                best_grade = _grade(
+                    ci, co, cs, ch_wf, wf_required=True, fwd=fwd, fwd_required=True, week=ch_week
+                )
+                best_grade["recent"] = best_recent
+                best_grade["week"] = ch_week
+                best_grade["week_prior_ret"] = ch_week.get("prior_ret")
+                promote_reason = "champion_rescue"
+                champion_rescue = True
+                state["pending_champion_rescue"] = False
+                state["champ_trail_streak"] = 0
+                log.info(
+                    "CHAMPION RESCUE · trail=%+.0fpp streak · pending_drift=%s · "
+                    "deploying champ week=%+.0f%% (live %+0.f%%)",
+                    trail_pp * 100,
+                    pending_drift,
+                    champ_week_live * 100,
+                    live_week_now * 100,
+                )
+            else:
+                log.info(
+                    "champion trail · live_week=%+.0f%% champ=%+.0f%% trail=%+.0fpp "
+                    "streak=%d pending_drift=%s",
+                    live_week_now * 100,
+                    champ_week_live * 100,
+                    trail_pp * 100,
+                    int(state.get("champ_trail_streak") or 0),
+                    pending_drift,
+                )
+        except Exception as e:
+            log.warning("champion rescue eval failed: %s", e)
 
     # F4 finalist: re-score holdout week on FULL paper symbol book before research promote
     require_wf = bool(HUNT_TARGETS.get("require_walk_forward", True))
@@ -936,7 +1150,12 @@ def improve_once(
     best_week_ret_now = float(best_week.get("ret") or 0)
     # Never research-promote below the (possibly stale-adjusted) champion floor
     # (silence_rotate is the escape hatch when Live is idle under that floor).
-    if not silence_rotate and best_cfg is not base and best_week_ret_now + 0.001 < champ_week_floor:
+    if (
+        not silence_rotate
+        and not champion_rescue
+        and best_cfg is not base
+        and best_week_ret_now + 0.001 < champ_week_floor
+    ):
         material_ok = False
         material_why = (
             f"below champion week {champ_week_floor:+.0%} (cand {best_week_ret_now:+.0%})"
@@ -950,12 +1169,17 @@ def improve_once(
             # Idle paper must rotate even if the alternate fails kill-illusion /
             # climb gates — otherwise a silent champion freezes Live forever.
             silence_rotate
+            or champion_rescue
             or (
                 wf_gate_ok
                 and not best_grade.get("kill_illusion")
                 and _is_climb_ok(best_i, best_o, best_soft, base_i, base_o)
                 and material_ok
                 and best_week_ret_now + 0.001 >= champ_week_floor
+                and (
+                    _dual_week_ok(best_week)
+                    or best_week_ret_now >= float(HUNT_TARGETS.get("week_return", 1.0))
+                )
             )
         )
     )
@@ -971,6 +1195,16 @@ def improve_once(
             material_why = "walk-forward unavailable — promote blocked"
         elif not best_wf_ok:
             material_why = f"walk-forward fail ({(best_wf or {}).get('why', 'no')})"
+    if champion_rescue and research_improved:
+        material_ok = True
+        material_why = "champion_rescue"
+        log.info(
+            "CHAMPION RESCUE promote locked · %s %sx@%s week=%+.0f%%",
+            best_cfg.strategy,
+            int(best_cfg.leverage),
+            best_cfg.timeframe,
+            best_week_ret_now * 100,
+        )
     if silence_rotate and research_improved:
         material_ok = True
         material_why = f"silence_rotate idle={idle_h:.1f}h"
@@ -1014,8 +1248,13 @@ def improve_once(
             }
             _save_autopilot_state(state)
     # Finalist honesty on full book (max calendar under bar cap).
-    # Skip for silence_rotate — that path exists to break Live free now.
-    if research_improved and len(full_symbols) > len(symbols) and not silence_rotate:
+    # Skip for silence_rotate / champion_rescue — escape hatches to free Live now.
+    if (
+        research_improved
+        and len(full_symbols) > len(symbols)
+        and not silence_rotate
+        and not champion_rescue
+    ):
         try:
             f_raw = _hunt_fetch_raw(
                 full_symbols,
@@ -1141,7 +1380,12 @@ def improve_once(
             }
 
     improved = bool(research_improved)  # research tier → .env
-    promote_tier = "research" if improved else "hold"
+    if champion_rescue and improved:
+        promote_tier = "champion_rescue"
+    elif silence_rotate and improved:
+        promote_tier = "silence_rotate"
+    else:
+        promote_tier = "research" if improved else "hold"
     # F3: confirmed / elite requires forward paper proof
     fwd_ok = bool(fwd and fwd.get("ok"))
     confirmed = bool(improved and fwd_ok and best_grade.get("targets_met"))
