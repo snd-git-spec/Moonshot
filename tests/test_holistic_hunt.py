@@ -179,12 +179,12 @@ def test_leverage_ladder_respects_matrix():
 
 
 def test_freeze_risk_forces_25_off_15m():
+    """A.1: risk rails (incl. leverage) are pinned to base — matrix no longer mutates them."""
     from moonshot.hunt.scoring import _freeze_risk
 
     base = Config(aggressive_mode=True, leverage=10, timeframe="15m", risk_pct=0.03)
     cand = replace(base, leverage=25, timeframe="15m", risk_pct=0.05)
     out = _freeze_risk(base, cand)
-    assert str(out.timeframe) == "5m"
-    assert int(out.leverage) == 25
-    # Climbing lev must not inflate risk vs base
-    assert float(out.risk_pct) <= float(base.risk_pct) + 1e-9
+    assert int(out.leverage) == 10
+    assert float(out.risk_pct) == pytest.approx(0.03)
+    assert float(out.max_daily_loss_pct) == float(base.max_daily_loss_pct)

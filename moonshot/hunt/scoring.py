@@ -58,7 +58,12 @@ def _soft_kill_cfg(cfg: Config) -> Config:
 
 
 def _freeze_risk(base: Config, c: Config) -> Config:
-    """Risk/margin/filters/exits/strategy/TF hunt-able. Aggressive: leverage up to 25x."""
+    """Pin risk rails to base (A.1); filters/exits/HTF remain hunt-able.
+
+    Leverage, risk_pct, daily-loss halt, and peak-DD kill always match ``base``.
+    Lev×TF matrix helpers remain in-tree for post-KEEP research but are not
+    applied here.
+    """
     aggressive = bool(getattr(base, "aggressive_mode", False))
     # Strategy + TF may change in explore/breakout (Layer 4 / 4c)
     strat = str(getattr(c, "strategy", base.strategy) or base.strategy).strip().lower()
@@ -72,46 +77,16 @@ def _freeze_risk(base: Config, c: Config) -> Config:
     if tf not in HUNT_TF_ALLOW:
         tf = str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m"
 
+    # A.1 — risk rails pinned to deployed/base book
+    lev = int(base.leverage)
+    risk = float(base.risk_pct)
+    max_acct = float(base.max_account_leverage)
+    max_net = float(getattr(base, "max_net_leverage", lev))
+    max_open = int(getattr(c, "max_open_positions", getattr(base, "max_open_positions", 4)) or 4)
     if aggressive:
-        lev = int(max(5, min(25, int(getattr(c, "leverage", base.leverage) or base.leverage))))
-        # 25x only on short clocks
-        # Fixed lev×TF matrix: 25x only on 5m; 15x@15m kept but density-gated later
-        if lev >= 25 and tf != "5m":
-            tf = "5m"
-        # Risk / book size scale DOWN with leverage (never inflate risk with lev)
-        base_risk = float(getattr(base, "risk_pct", 0.02) or 0.02)
-        if lev >= 25:
-            risk_hi, open_hi, stop_lo = 0.02, 4, 2.5
-        elif lev >= 15:
-            risk_hi, open_hi, stop_lo = 0.025, 6, 2.25
-        elif lev >= 10:
-            risk_hi, open_hi, stop_lo = 0.03, 8, 2.0
-        else:
-            risk_hi, open_hi, stop_lo = 0.05, 8, 1.5
-        risk = float(max(0.015, min(risk_hi, float(c.risk_pct))))
-        if lev > int(getattr(base, "leverage", lev) or lev):
-            # Climbing leverage must not raise risk_pct vs the source book
-            risk = float(min(risk, base_risk))
-        max_open = int(
-            max(
-                1,
-                min(
-                    open_hi,
-                    int(
-                        getattr(c, "max_open_positions", getattr(base, "max_open_positions", 4))
-                        or 4
-                    ),
-                ),
-            )
-        )
-        max_acct = float(min(25.0, float(lev)))
-        max_net = float(min(25.0, float(lev)))
-        stop_atr = float(max(stop_lo, min(4.0, c.initial_stop_atr)))
+        max_open = int(max(1, min(8, max_open)))
+        stop_atr = float(max(1.5, min(4.0, c.initial_stop_atr)))
     else:
-        lev = int(base.leverage)
-        risk = float(max(0.02, min(0.05, c.risk_pct)))
-        max_acct = float(base.max_account_leverage)
-        max_net = float(getattr(base, "max_net_leverage", 3.0))
         max_open = int(getattr(base, "max_open_positions", 3))
         stop_atr = float(max(1.5, min(4.0, c.initial_stop_atr)))
         strat = (base.strategy or "trend_mtf").strip().lower()
@@ -119,21 +94,12 @@ def _freeze_risk(base: Config, c: Config) -> Config:
 
     margin = float(max(0.16, min(0.80, c.initial_margin_pct)))
     margin = max(margin, min(0.80, risk * 8.0))
-    # Kill rails for leveraged minute books
-    if aggressive and (tf.endswith("m") or int(lev) >= 5):
-        daily_lo, daily_hi = 0.28, 0.40
-        dd_lo, dd_hi = 0.50, 0.65
-        exp_floor = float(min(-0.10, max(-0.35, getattr(c, "expectancy_floor", -0.15))))
-        streak_n = int(max(6, min(12, getattr(c, "streak_losses", 7) or 7)))
-        streak_hrs = float(max(6.0, min(24.0, getattr(c, "streak_pause_hours", 12.0) or 12.0)))
-    else:
-        daily_lo, daily_hi = 0.10, 0.35
-        dd_lo, dd_hi = 0.35, 0.60
-        exp_floor = float(getattr(c, "expectancy_floor", base.expectancy_floor))
-        streak_n = int(getattr(c, "streak_losses", base.streak_losses))
-        streak_hrs = float(getattr(c, "streak_pause_hours", base.streak_pause_hours))
-    daily = float(max(daily_lo, min(daily_hi, max(c.max_daily_loss_pct, risk * 3))))
-    peak_dd = float(max(dd_lo, min(dd_hi, c.max_peak_drawdown_pct)))
+    # Kill rails pinned to base (A.1)
+    daily = float(base.max_daily_loss_pct)
+    peak_dd = float(base.max_peak_drawdown_pct)
+    exp_floor = float(getattr(base, "expectancy_floor", -0.15))
+    streak_n = int(getattr(base, "streak_losses", 5))
+    streak_hrs = float(getattr(base, "streak_pause_hours", 48.0))
     h4_fast = int(
         max(8, min(50, int(getattr(c, "h4_ema_fast", base.h4_ema_fast) or base.h4_ema_fast)))
     )
