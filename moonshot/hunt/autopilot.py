@@ -33,6 +33,7 @@ from moonshot.hunt.constants import (
     _load_autopilot_state,
     _pct_of_risk_msg,
     _save_autopilot_state,
+    autopilot_frozen,
 )
 from moonshot.hunt.scoring import (
     POST_PROMOTE_HUNT_PAUSE_SEC,
@@ -117,6 +118,10 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
             "Autopilot refuses to start while LIVE_TRADING_ENABLED=1. "
             "Set it to 0 — autopilot is practice-only."
         )
+    if autopilot_frozen():
+        log.info("AUTOPILOT_FROZEN=1: promotions and paper restarts from hunt suppressed")
+    else:
+        log.info("AUTOPILOT_FROZEN=0: promotions enabled")
     # Focus hunt + paper on BTC until edge is proven; --symbols overrides.
     symbols = args.symbols or list(HUNT_SYMBOLS)
     paper_symbols = args.symbols or list(PAPER_SYMBOLS)
@@ -171,9 +176,16 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
                 gen_box["n"] += 1
                 met = bool((decision.get("grade") or {}).get("targets_met"))
                 if decision.get("improved"):
-                    just_promoted = True
-                    restart_paper.set()
-                    _live_feed("paper_restart", "Restarting practice bot with new settings…")
+                    if autopilot_frozen():
+                        log.info(
+                            "AUTOPILOT_FROZEN=1: promotion suppressed — paper not restarted"
+                        )
+                    else:
+                        just_promoted = True
+                        restart_paper.set()
+                        _live_feed(
+                            "paper_restart", "Restarting practice bot with new settings…"
+                        )
             except Exception as e:
                 log.error("improve pass failed: %s", e)
                 _live_feed("error", f"Improve pass failed: {e}")

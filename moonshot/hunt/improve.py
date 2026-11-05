@@ -56,6 +56,7 @@ from moonshot.hunt.constants import (
     _save_autopilot_state,
     _utc_now,
     _week_delta_needed,
+    autopilot_frozen,
 )
 from moonshot.hunt.scoring import (
     PAPER_SILENCE_ROTATE_HOURS,
@@ -1561,6 +1562,18 @@ def improve_once(
     )
     week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
     week_gap = max(0.0, week_tgt - float(best_week.get("ret") or 0))
+    if improved and autopilot_frozen():
+        log.info("AUTOPILOT_FROZEN=1: promotion suppressed")
+        decision["promote_suppressed"] = True
+        decision["improved"] = False
+        decision["promote_tier"] = "hold"
+        decision["message"] = (
+            f"FROZEN — would promote {best_cfg.strategy} {best_cfg.leverage}x@"
+            f"{best_cfg.timeframe} but AUTOPILOT_FROZEN=1 (no .env rewrite)."
+        )
+        improved = False
+        promote_tier = "hold"
+        _live_feed("hold", decision["message"], generation=generation)
     if improved:
         _patch_env(_cfg_to_env_updates(best_cfg))
         # Do NOT reset forward_since on research promote — that made FWD_MIN_TRADES

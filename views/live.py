@@ -966,6 +966,13 @@ def live_panel() -> None:
             ),
             (f"{lev}× leverage · {tf} candles" if lev else f"{tf} candles", "muted"),
         ]
+        try:
+            from moonshot.hunt.constants import autopilot_frozen as _ap_frozen
+
+            if _ap_frozen():
+                _chips.insert(0, ("FROZEN — no promotions", "warn"))
+        except Exception:
+            pass
         if just_upgraded:
             _chips.append(("New setup just applied", "ok"))
         chip_row(_chips)

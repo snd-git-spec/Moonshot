@@ -164,6 +164,13 @@ HUNT_LEV15_MIN_SOFT_TRADES = 20
 HUNT_LEV25_MIN_SOFT_TRADES = 35
 
 
+def autopilot_frozen() -> bool:
+    """When True: no .env promote / paper restart from hunt (measurement window)."""
+    import os
+
+    return os.getenv("AUTOPILOT_FROZEN", "0").strip() in ("1", "true", "TRUE", "yes", "YES")
+
+
 def _hunt_soft_workers() -> int:
     """Parallel soft-check workers (1–4). Default 2."""
     try:
