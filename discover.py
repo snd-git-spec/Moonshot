@@ -173,7 +173,8 @@ def enumerate_rules(atoms: dict) -> list:
 # ------------------------------------------------------------------
 # Outcomes: triple-barrier R per bar, long and short (net of costs)
 # ------------------------------------------------------------------
-def barrier_outcomes(df: pd.DataFrame, hold: int, cfg: ms.Config) -> tuple:
+def barrier_outcomes_reference(df: pd.DataFrame, hold: int, cfg: ms.Config) -> tuple:
+    """Original loop (kept for A.8 parity tests)."""
     o = df["open"].to_numpy(float)
     h = df["high"].to_numpy(float)
     l = df["low"].to_numpy(float)
@@ -218,6 +219,19 @@ def barrier_outcomes(df: pd.DataFrame, hold: int, cfg: ms.Config) -> tuple:
     return rl, rs
 
 
+def barrier_outcomes(df: pd.DataFrame, hold: int, cfg: ms.Config) -> tuple:
+    from moonshot.discover_fast import barrier_outcomes_vectorized
+
+    atr = ms.atr(df, 14).to_numpy(float)
+    return barrier_outcomes_vectorized(
+        df,
+        hold,
+        fee_taker=float(cfg.fee_taker),
+        slip=float(cfg.slip),
+        atr=atr,
+    )
+
+
 # ------------------------------------------------------------------
 # Rule evaluation
 # ------------------------------------------------------------------
@@ -255,10 +269,9 @@ class Data:
 
 
 def rule_mask(atoms: dict, names: tuple) -> np.ndarray:
-    m = atoms[names[0]][1].copy()
-    for nme in names[1:]:
-        m &= atoms[nme][1]
-    return m
+    from moonshot.discover_fast import signal_mask
+
+    return signal_mask(atoms, tuple(names), cache=True)
 
 
 def eval_rule(D: Data, rule: tuple, shift: int = 0) -> dict:
@@ -399,15 +412,43 @@ def main() -> None:
         verdict = (f"Possible edge: passers average {pooled:+.2f}R on untouched holdout "
                    f"({pos_frac:.0%} positive). Still needs forward paper proof.")
     print("\nVERDICT:", verdict, flush=True)
-    OUT.write_text(json.dumps({
-        "ts": pd.Timestamp.now(tz="UTC").isoformat(), "symbol": args.symbol, "tf": args.tf,
+    from moonshot.config_hash import config_hash as cfg_hash_fn
+    from moonshot.discover_fast import data_hash_from_frame
+    from moonshot.experiment_log import log_run
+
+    ch = cfg_hash_fn(cfg)
+    dh = data_hash_from_frame(raw)
+    payload = {
+        "ts": pd.Timestamp.now(tz="UTC").isoformat(),
+        "symbol": args.symbol,
+        "tf": args.tf,
+        "config_hash": ch,
+        "data_hash": dh,
         "exit": {"stop_atr": STOP_ATR, "target_r": TARGET_R, "hold_bars": D.hold},
-        "rules_searched": len(rules), "real_pass": len(found),
-        "null_mean": null_mean, "null_max": null_max, "null_counts": null_counts,
-        "baseline_long": base_long, "baseline_short": base_short,
-        "verdict": verdict, "top": rows,
-    }, indent=2, default=float))
-    print(f"saved {OUT.name}  ({time.time()-t0:.0f}s total)")
+        "rules_searched": len(rules),
+        "real_pass": len(found),
+        "null_mean": null_mean,
+        "null_max": null_max,
+        "null_counts": null_counts,
+        "baseline_long": base_long,
+        "baseline_short": base_short,
+        "verdict": verdict,
+        "top": rows,
+    }
+    OUT.write_text(json.dumps(payload, indent=2, default=float))
+    run_id = f"discover_{pd.Timestamp.now(tz='UTC').strftime('%Y%m%d_%H%M%S')}"
+    try:
+        log_run(
+            run_id=run_id,
+            kind="discover",
+            config_hash=ch,
+            data_hash=dh,
+            metrics={"real_pass": len(found), "null_mean": null_mean},
+            meta={"symbol": args.symbol, "tf": args.tf},
+        )
+    except Exception as e:
+        print(f"(experiment_log skip: {e})", flush=True)
+    print(f"saved {OUT.name}  config_hash={ch} data_hash={dh}  ({time.time()-t0:.0f}s total)")
 
 
 if __name__ == "__main__":
