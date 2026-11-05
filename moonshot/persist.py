@@ -63,13 +63,23 @@ class Persistence:
         for col, decl in (("entry_time", "TEXT"), ("partial_taken", "INTEGER"), ("mode", "TEXT")):
             self._ensure_col("trades", col, decl)
         self._ensure_col("equity", "mode", "TEXT")
+        for col, decl in (
+            ("config_hash", "TEXT"),
+            ("config_json", "TEXT"),
+            ("initial_risk_dollars", "REAL"),
+        ):
+            self._ensure_col("trades", col, decl)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_config_hash ON trades(config_hash)"
+        )
 
     def log_trade(self, t: TradeResult) -> None:
         self.conn.execute(
             """INSERT INTO trades
                (ts, symbol, direction, entry, exit, qty, pnl, r_multiple, liquidated,
-                exit_reason, adds, fees, funding, entry_time, partial_taken, mode)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                exit_reason, adds, fees, funding, entry_time, partial_taken, mode,
+                config_hash, config_json, initial_risk_dollars)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pd.Timestamp(t.exit_time).isoformat(),
                 t.symbol,
@@ -87,6 +97,9 @@ class Persistence:
                 pd.Timestamp(t.entry_time).isoformat(),
                 int(t.partial_taken),
                 self.mode,
+                getattr(t, "config_hash", None),
+                getattr(t, "config_json", None),
+                float(getattr(t, "initial_risk_dollars", 0.0) or 0.0),
             ),
         )
         self.conn.commit()

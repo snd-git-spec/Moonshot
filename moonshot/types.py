@@ -173,6 +173,9 @@ class TradeResult:
     partial_taken: bool
     fees: float
     funding: float
+    initial_risk_dollars: float = 0.0
+    config_hash: str | None = None
+    config_json: str | None = None
 
     @property
     def duration_hours(self) -> float:

@@ -171,6 +171,7 @@ class Position:
             partial_taken=self.partial_done,
             fees=self.fees + fee,
             funding=self.funding,
+            initial_risk_dollars=float(risk),
         )
         self.current_qty = 0.0
         return res, gross - fee

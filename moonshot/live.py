@@ -1005,6 +1005,13 @@ class LiveRunner:
         except Exception:
             pass
         res, _ = pos.close_out(px, fee, ts, reason)
+        try:
+            from moonshot.config_hash import canonical_json, config_hash
+
+            res.config_hash = config_hash(self.cfg)
+            res.config_json = canonical_json(self.cfg)
+        except Exception:
+            pass
         self.positions.pop(sym, None)
         self.pend_exit.pop(sym, None)
         self.db.save_position(sym, None)
