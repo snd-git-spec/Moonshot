@@ -106,9 +106,9 @@ class Config:
     require_weekly_bias: bool = False
     ema_weekly_period: int = 10
 
-    # time stop — dump stagnant trades that never reach +min_r (hunt-optional)
-    enable_time_stop: bool = False
-    time_stop_bars: int = 12
+    # time stop — from_env defaults ENABLE_TIME_STOP=1, TIME_STOP_BARS=8
+    enable_time_stop: bool = True
+    time_stop_bars: int = 8
     time_stop_min_r: float = 1.0
 
     # pyramiding
@@ -118,8 +118,8 @@ class Config:
     min_add_qty_pct: float = 0.25
     addon_giveback_r: float = 0.0  # 0 = adds must be "free-roll" at the tightened stop
 
-    # partial profit — hunt-optional (forced early partial hurt some windows)
-    enable_partial: bool = False
+    # partial profit — from_env default ENABLE_PARTIAL=1
+    enable_partial: bool = True
     partial_at_r: float = 1.0
     partial_pct: float = 0.50
 
