@@ -155,6 +155,13 @@ HUNT_BANLIST_CAP = 5000
 HUNT_BAN_WEEK_FLOOR = -0.20  # week_ret below this → ban
 HUNT_CHAMP_TRAIL_PP = 0.30  # champ − live week ≥ 30pp
 HUNT_CHAMP_TRAIL_PASSES = 2  # consecutive passes before rescue
+# Silence rotate may not deploy a book worse than peak same-window reeval by more than this.
+HUNT_SILENCE_MAX_PEAK_GAP_PP = 0.20
+# High-lev density floors (holdout week trades)
+HUNT_LEV15_MIN_WEEK_TRADES = 12
+HUNT_LEV25_MIN_WEEK_TRADES = 20
+HUNT_LEV15_MIN_SOFT_TRADES = 20
+HUNT_LEV25_MIN_SOFT_TRADES = 35
 
 
 def _hunt_soft_workers() -> int:
@@ -446,6 +453,10 @@ def _cfg_to_knobs(cfg: Config) -> dict:
         "require_squeeze": cfg.require_squeeze,
         "require_rsi_veto": cfg.require_rsi_veto,
         "require_btc_regime": cfg.require_btc_regime,
+        "require_h4_bias": bool(getattr(cfg, "require_h4_bias", False)),
+        "require_daily_align": bool(getattr(cfg, "require_daily_align", False)),
+        "require_weekly_bias": bool(getattr(cfg, "require_weekly_bias", False)),
+        "ema_weekly_period": int(getattr(cfg, "ema_weekly_period", 10) or 10),
         "rsi_long_max": cfg.rsi_long_max,
         "rsi_short_min": cfg.rsi_short_min,
         "squeeze_lookback": cfg.squeeze_lookback,
@@ -528,6 +539,10 @@ def _cfg_to_env_updates(cfg: Config) -> dict:
         "KC_PERIOD": str(int(cfg.kc_period)),
         "KC_ATR_MULT": str(cfg.kc_atr_mult),
         "REQUIRE_BTC_REGIME": "1" if cfg.require_btc_regime else "0",
+        "REQUIRE_H4_BIAS": "1" if getattr(cfg, "require_h4_bias", False) else "0",
+        "REQUIRE_DAILY_ALIGN": "1" if getattr(cfg, "require_daily_align", False) else "0",
+        "REQUIRE_WEEKLY_BIAS": "1" if getattr(cfg, "require_weekly_bias", False) else "0",
+        "EMA_WEEKLY_PERIOD": str(int(getattr(cfg, "ema_weekly_period", 10) or 10)),
         "ENABLE_TIME_STOP": "1" if cfg.enable_time_stop else "0",
         "TIME_STOP_BARS": str(int(cfg.time_stop_bars)),
         "TIME_STOP_MIN_R": str(cfg.time_stop_min_r),

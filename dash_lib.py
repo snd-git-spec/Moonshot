@@ -432,12 +432,14 @@ def hero_panel(level: str, headline: str, detail: str, stats: list[dict]) -> Non
             f'<div class="ms-stat-value">{s["value"]}</div>'
             f'{hint}</div>'
         )
+    n = max(2, min(len(stats) or 2, 6))
+    grid = f"ms-stat-grid cols-{n}" if n != 4 else "ms-stat-grid"
     st.markdown(
         f'<div class="ms-hero {klass}">'
         f'<div class="ms-hero-label">Strategy quality</div>'
         f'<div class="ms-hero-headline">{headline}</div>'
         f'<p class="ms-hero-detail">{detail}</p>'
-        f'<div class="ms-stat-grid">{"".join(tiles)}</div>'
+        f'<div class="{grid}">{"".join(tiles)}</div>'
         f"</div>",
         unsafe_allow_html=True,
     )

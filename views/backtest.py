@@ -553,6 +553,11 @@ with c_sym:
         ALL_SYMBOLS,
         key="bt_lab_symbols",
     )
+if symbols and ms.needs_btc_regime_context(symbols, cfg0):
+    st.caption(
+        "No BTC selected — run will still download BTC as **regime context** "
+        "(not traded) so results match Live’s BTC filter."
+    )
 
 c_ref, c_spl = st.columns(2)
 with c_ref:
@@ -841,7 +846,25 @@ if run:
                 bool(refresh),
                 str(price_source),
             )
-            data = ms.prepare_data(raw, run_cfg)
+            # Live/hunt always have BTC for the regime gate. Alt-only Backtest
+            # must fetch BTC as non-traded context or every entry is blocked.
+            context = None
+            btc_ctx = False
+            if ms.needs_btc_regime_context(symbols, run_cfg):
+                btc = ms.default_btc_symbol()
+                context = {
+                    btc: ms.fetch_historical_range(
+                        btc,
+                        str(run_tf),
+                        win_start,
+                        win_end,
+                        warmup_bars=int(warmup),
+                        refresh=bool(refresh),
+                        source=str(price_source),
+                    )
+                }
+                btc_ctx = True
+            data = ms.prepare_data(raw, run_cfg, context=context)
         except ms.BotError as e:
             msg = str(e)
             # Listing-date / empty-window errors already say what to do.
@@ -885,6 +908,7 @@ if run:
     _cfg_label = (
         f"{_src_label} · {run_cfg.strategy} · {int(run_cfg.leverage)}× · {run_tf}"
         + (f" (book {_book_tf})" if run_tf != _book_tf else "")
+        + (" · BTC regime context" if btc_ctx else "")
     )
     st.session_state["bt_lab"] = {
         "full": full,
@@ -903,6 +927,7 @@ if run:
         "tf_note": tf_note,
         "start_eq": float(run_cfg.starting_equity),
         "run_ts": datetime.now(timezone.utc).isoformat(),
+        "btc_regime_context": bool(btc_ctx),
     }
 
 if "bt_lab" not in st.session_state:
@@ -927,6 +952,12 @@ if split is not None:
 meta_line(
     f"{_run_label} · {lab.get('cfg_label') or _book} · {_window}"
 )
+if lab.get("btc_regime_context"):
+    st.caption(
+        "BTC was downloaded as **regime context only** (not traded) so the "
+        "live book’s BTC filter matches Live/hunt. Pick BTC in Coins if you "
+        "want it traded too."
+    )
 
 section_header("Results", "Performance · equity · pace · price with entries/exits")
 

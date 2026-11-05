@@ -15,7 +15,16 @@ from moonshot.paths import (
 
 from moonshot.types import BotError, DataError
 from moonshot.config import Config
-from moonshot.features import adx, atr, build_features, ema, prepare_data, rsi
+from moonshot.features import (
+    adx,
+    atr,
+    build_features,
+    default_btc_symbol,
+    ema,
+    needs_btc_regime_context,
+    prepare_data,
+    rsi,
+)
 from moonshot.data import (
     MAX_RANGE_BARS,
     RANGE_SOURCE_BINANCE_SPOT,
@@ -73,6 +82,8 @@ __all__ = [
     "synthetic_ohlcv",
     "public_exchange",
     "prepare_data",
+    "default_btc_symbol",
+    "needs_btc_regime_context",
     "range_warmup_bars",
     "estimate_range_bars",
     "estimate_range_fetch_bars",

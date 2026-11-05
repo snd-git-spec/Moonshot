@@ -151,6 +151,28 @@ class Momentum15Strategy:
             if want_short and bar.close > ema_htf:
                 return None
 
+        # Optional hard HTF gates (hunt-searchable; per-symbol context)
+        if self.cfg.require_h4_bias:
+            h4 = float(getattr(bar, "h4_bias", 0.0) or 0.0)
+            if want_long and h4 <= 0:
+                return None
+            if want_short and h4 >= 0:
+                return None
+        if self.cfg.require_daily_align:
+            d_close = getattr(bar, "d_close", float("nan"))
+            d_ema = getattr(bar, "d_ema", float("nan"))
+            if d_close == d_close and d_ema == d_ema:
+                if want_long and d_close <= d_ema:
+                    return None
+                if want_short and d_close >= d_ema:
+                    return None
+        if self.cfg.require_weekly_bias:
+            wb = float(getattr(bar, "weekly_bias", 0.0) or 0.0)
+            if want_long and wb <= 0:
+                return None
+            if want_short and wb >= 0:
+                return None
+
         tag = f"mom={mom:+.2f}ATR ADX={bar.adx:.1f} vol x{bar.vol_ratio:.1f}"
         if want_long:
             return Signal(

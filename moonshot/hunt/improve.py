@@ -30,6 +30,7 @@ from moonshot.hunt.constants import (
     HUNT_CHAMPION_STALE_PP,
     HUNT_CHAMP_TRAIL_PASSES,
     HUNT_CHAMP_TRAIL_PP,
+    HUNT_SILENCE_MAX_PEAK_GAP_PP,
     HUNT_CURRICULUM_SYMBOLS,
     HUNT_HALVING_A_DAYS,
     HUNT_HALVING_A_KEEP,
@@ -67,6 +68,10 @@ from moonshot.hunt.scoring import (
     _candidate_cfgs,
     _cfg_fingerprint,
     _champion_from_history,
+    _density_polish_cfgs,
+    _raise_champion_peak,
+    _resolve_champion_peak,
+    _sync_champion_peak,
     _dedupe_cfgs,
     _discover_seed_cfgs,
     _dual_week_eval,
@@ -82,6 +87,7 @@ from moonshot.hunt.scoring import (
     _is_climb_ok,
     _is_screenable,
     _is_valid_candidate,
+    _lev_density_ok,
     _leverage_ladder_cfgs,
     _material_research_edge,
     _paper_idle_hours,
@@ -129,7 +135,9 @@ def improve_once(
     mode = "HUNT" if hunt else "TUNE"
     state = _load_autopilot_state()
     held = _held_streak(state)
-    champion_preview = state.get("champion") if isinstance(state.get("champion"), dict) else None
+    champion_preview = _resolve_champion_peak(state)
+    if champion_preview:
+        _sync_champion_peak(state, champion_preview)
     has_champion = bool(champion_preview and champion_preview.get("knobs"))
     search_mode = _hunt_search_mode(generation, held, hunt, has_champion=has_champion)
     full_symbols = list(symbols)
@@ -317,12 +325,9 @@ def improve_once(
     # Champion = best holdout-week book ever kept (independent of forward proof).
     # Live / research promote must not fall below this week. Rebuild from history
     # if a reseed/wipe left a weaker floor (that is how −26% got applied).
-    champion = _champion_from_history(
-        list(state.get("history") or []),
-        state.get("champion") if isinstance(state.get("champion"), dict) else None,
-    )
+    champion = _resolve_champion_peak(state)
     if champion:
-        state["champion"] = champion
+        _sync_champion_peak(state, champion)
 
     best_cfg = base
     best_i, best_o, best_soft = base_i, base_o, base_soft
@@ -468,6 +473,14 @@ def improve_once(
                 require_squeeze=bool(kn.get("require_squeeze", base.require_squeeze)),
                 require_rsi_veto=bool(kn.get("require_rsi_veto", base.require_rsi_veto)),
                 require_btc_regime=bool(kn.get("require_btc_regime", base.require_btc_regime)),
+                require_h4_bias=bool(kn.get("require_h4_bias", base.require_h4_bias)),
+                require_daily_align=bool(
+                    kn.get("require_daily_align", base.require_daily_align)
+                ),
+                require_weekly_bias=bool(
+                    kn.get("require_weekly_bias", base.require_weekly_bias)
+                ),
+                ema_weekly_period=int(kn.get("ema_weekly_period", base.ema_weekly_period)),
                 rsi_long_max=float(kn.get("rsi_long_max", base.rsi_long_max)),
                 rsi_short_min=float(kn.get("rsi_short_min", base.rsi_short_min)),
                 squeeze_lookback=int(kn.get("squeeze_lookback", base.squeeze_lookback)),
@@ -863,7 +876,21 @@ def improve_once(
             ci, co = _eval_cfg(data, cand, split, end=fit_end)
             cweek = _week_eval(data, cand, end=t1)
             cs = None
-            if run_ladder_consider and _is_screenable(ci, co):
+            dense_ok = _lev_density_ok(
+                int(cand.leverage),
+                cweek,
+                dual_ok=True,  # ladder uses single-week; dual gated at promote
+                tf=str(cand.timeframe),
+            )
+            if int(cand.leverage) >= 15 and not dense_ok:
+                log.info(
+                    "lev ladder skip promote %sx@%s · sparse week n=%s soft=%s",
+                    int(cand.leverage),
+                    cand.timeframe,
+                    cweek.get("trades"),
+                    cweek.get("soft_trades"),
+                )
+            if run_ladder_consider and dense_ok and _is_screenable(ci, co):
                 cs = _eval_soft_oos(data, cand, split, end=fit_end)
                 if _is_climb_ok(ci, co, cs, base_i, base_o):
                     _consider(cand, ci, co, cs, "lev_ladder")
@@ -912,13 +939,14 @@ def improve_once(
             ),
         )
 
-    # ---- Silence rotate: paper idle → deploy a different tradeable book ----
-    # Auto-improve must *test* approaches on paper, not only backtest against a
-    # frozen high holdout-week champion that produces zero live setups.
+    week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
+    hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+
+    # ---- Policy-3 champion rescue BEFORE silence (prefer peak over rotate junk) ----
+    champion_rescue = False
+    champ_week_live = None
     silence_rotate = False
     idle_h = float(_paper_idle_hours())
-    # Fresh .env deploys (manual force / research promote) restart the idle clock
-    # so an empty trades table (idle≈999) cannot immediately rotate away the book.
     _deploy_ts_candidates: list[str] = []
     _man = state.get("manual_champion_deploy") or {}
     if isinstance(_man, dict) and _man.get("ts"):
@@ -931,75 +959,7 @@ def improve_once(
             idle_h = min(idle_h, max(0.0, float(_since)))
         except Exception:
             pass
-    week_min = int(HUNT_TARGETS.get("week_min_trades", 4))
-    if (
-        best_cfg is base
-        and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
-        and held >= 3
-        and rotate_pool
-    ):
-        base_fp = _cfg_fingerprint(base)
-        # Prefer denser week activity, then week return, then fit rank.
-        rotate_pool.sort(key=lambda r: (r[1] + r[2], r[0], r[3]), reverse=True)
-        for _wr, wn, wsn, _rk, cand, ci, co, cs, cweek in rotate_pool:
-            if _cfg_fingerprint(cand) == base_fp:
-                continue
-            if int(wn) < week_min and int(wsn) < week_min:
-                continue
-            if not _is_screenable(ci, co):
-                continue
-            cwf = _wf_for(cand) if wf_enabled else None
-            if wf_enabled and not (cwf and cwf.get("ok")):
-                continue
-            best_cfg, best_i, best_o, best_soft, best_wf = cand, ci, co, cs, cwf
-            best_week = cweek
-            best_recent = _recent_eval(
-                _prepare_cached(_raw_for_tf(str(cand.timeframe)) or raw, cand, feat_cache),
-                cand,
-                end=t1,
-            )
-            best_grade = _grade(
-                ci,
-                co,
-                cs,
-                cwf,
-                wf_required=True,
-                fwd=fwd,
-                fwd_required=True,
-                week=cweek,
-            )
-            best_grade["recent"] = best_recent
-            best_grade["week"] = cweek
-            promote_reason = "silence_rotate"
-            silence_rotate = True
-            log.info(
-                "silence rotate · paper idle %.1fh · deploying %s %sx@%s week=%+.0f%% n=%d "
-                "(champion holdout no longer freezes Live)",
-                idle_h,
-                cand.strategy,
-                int(cand.leverage),
-                cand.timeframe,
-                float(cweek.get("ret") or 0) * 100,
-                int(wn),
-            )
-            break
-        if not silence_rotate:
-            log.info(
-                "silence rotate skipped · idle %.1fh but no alternate screenable book in pool (%d)",
-                idle_h,
-                len(rotate_pool),
-            )
-    elif best_cfg is base and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS):
-        log.info(
-            "silence rotate armed · paper idle %.1fh · held=%d pool=%d (need held>=3 + pool)",
-            idle_h,
-            held,
-            len(rotate_pool),
-        )
 
-    # ---- Policy-3 champion rescue: drift pending OR trail ≥30pp for 2 passes ----
-    champion_rescue = False
-    champ_week_live = None
     if champion and champion.get("knobs"):
         try:
             ch_cfg = _knobs_to_cfg(champion["knobs"])
@@ -1014,14 +974,20 @@ def improve_once(
             else:
                 state["champ_trail_streak"] = 0
             pending_drift = bool(state.get("pending_champion_rescue"))
-            trail_ready = int(state.get("champ_trail_streak") or 0) >= int(HUNT_CHAMP_TRAIL_PASSES)
-            hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+            trail_ready = int(state.get("champ_trail_streak") or 0) >= int(
+                HUNT_CHAMP_TRAIL_PASSES
+            )
+            # Idle under peak also arms rescue (before silence can swap families).
+            idle_under_peak = (
+                idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
+                and _cfg_fingerprint(ch_cfg) != _cfg_fingerprint(base)
+            )
             dual_ok = _dual_week_ok(ch_week) or champ_week_live >= hard_floor
             ch_wf = _wf_for(ch_cfg) if wf_enabled else {"ok": True}
             wf_ok_rescue = (not wf_enabled) or bool(ch_wf and ch_wf.get("ok"))
             if (
                 best_cfg is base
-                and (pending_drift or trail_ready)
+                and (pending_drift or trail_ready or idle_under_peak)
                 and dual_ok
                 and wf_ok_rescue
                 and champ_week_live >= hard_floor
@@ -1043,25 +1009,147 @@ def improve_once(
                 state["pending_champion_rescue"] = False
                 state["champ_trail_streak"] = 0
                 log.info(
-                    "CHAMPION RESCUE · trail=%+.0fpp streak · pending_drift=%s · "
+                    "CHAMPION RESCUE · trail=%+.0fpp · pending_drift=%s idle_under_peak=%s · "
                     "deploying champ week=%+.0f%% (live %+0.f%%)",
                     trail_pp * 100,
                     pending_drift,
+                    idle_under_peak,
                     champ_week_live * 100,
                     live_week_now * 100,
                 )
             else:
                 log.info(
                     "champion trail · live_week=%+.0f%% champ=%+.0f%% trail=%+.0fpp "
-                    "streak=%d pending_drift=%s",
+                    "streak=%d pending_drift=%s idle_under_peak=%s",
                     live_week_now * 100,
                     champ_week_live * 100,
                     trail_pp * 100,
                     int(state.get("champ_trail_streak") or 0),
                     pending_drift,
+                    idle_under_peak,
                 )
         except Exception as e:
             log.warning("champion rescue eval failed: %s", e)
+
+    # ---- Silence rotate: paper idle → Live only (never clobbers champion_peak) ----
+    if (
+        (not champion_rescue)
+        and best_cfg is base
+        and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
+        and held >= 3
+    ):
+        base_fp = _cfg_fingerprint(base)
+        peak_fp = None
+        peak_cfg_live = None
+        if champion and champion.get("knobs"):
+            try:
+                peak_cfg_live = _knobs_to_cfg(champion["knobs"])
+                peak_fp = _cfg_fingerprint(peak_cfg_live)
+            except Exception:
+                peak_cfg_live = None
+                peak_fp = None
+
+        # If Live IS the peak book, densify peak filters before swapping families.
+        if peak_cfg_live is not None and peak_fp == base_fp:
+            for cand in _density_polish_cfgs(peak_cfg_live):
+                try:
+                    cand = _freeze_risk(base, cand)
+                    if _cfg_fingerprint(cand) == base_fp:
+                        continue
+                    use_raw = _raw_for_tf(str(cand.timeframe)) or raw
+                    if not use_raw:
+                        continue
+                    data = _prepare_cached(use_raw, cand, feat_cache)
+                    ci, co = _eval_cfg(data, cand, split, end=fit_end)
+                    cs = _eval_soft_oos(data, cand, split, end=fit_end)
+                    cweek = _dual_week_eval(data, cand, end=t1)
+                    if not _is_screenable(ci, co):
+                        continue
+                    if not _is_climb_ok(ci, co, cs, base_i, base_o):
+                        continue
+                    wn = int(cweek.get("trades") or 0)
+                    if wn < week_min and int(cweek.get("soft_trades") or 0) < week_min:
+                        continue
+                    best_cfg, best_i, best_o, best_soft = cand, ci, co, cs
+                    best_week = cweek
+                    best_recent = _recent_eval(data, cand, end=t1)
+                    best_grade = _grade(
+                        ci, co, cs, None, wf_required=False, fwd=fwd, fwd_required=True, week=cweek
+                    )
+                    best_grade["recent"] = best_recent
+                    best_grade["week"] = cweek
+                    promote_reason = "silence_density"
+                    silence_rotate = True
+                    log.info(
+                        "silence density polish · idle %.1fh · %s %sx@%s week=%+.0f%% "
+                        "(peak family kept)",
+                        idle_h,
+                        cand.strategy,
+                        int(cand.leverage),
+                        cand.timeframe,
+                        float(cweek.get("ret") or 0) * 100,
+                    )
+                    break
+                except Exception as e:
+                    log.warning("density polish candidate failed: %s", e)
+
+        if (not silence_rotate) and rotate_pool:
+            rotate_pool.sort(key=lambda r: (r[1] + r[2], r[0], r[3]), reverse=True)
+            peak_live = float(champ_week_live) if champ_week_live is not None else None
+            for _wr, wn, wsn, _rk, cand, ci, co, cs, cweek in rotate_pool:
+                if _cfg_fingerprint(cand) == base_fp:
+                    continue
+                if int(wn) < week_min and int(wsn) < week_min:
+                    continue
+                if not _is_screenable(ci, co):
+                    continue
+                cret = float(cweek.get("ret") or 0)
+                if not (_dual_week_ok(cweek) or cret >= hard_floor):
+                    continue
+                if peak_live is not None and cret < peak_live - float(HUNT_SILENCE_MAX_PEAK_GAP_PP):
+                    continue
+                cwf = _wf_for(cand) if wf_enabled else None
+                if wf_enabled and not (cwf and cwf.get("ok")):
+                    continue
+                best_cfg, best_i, best_o, best_soft, best_wf = cand, ci, co, cs, cwf
+                best_week = cweek
+                best_recent = _recent_eval(
+                    _prepare_cached(_raw_for_tf(str(cand.timeframe)) or raw, cand, feat_cache),
+                    cand,
+                    end=t1,
+                )
+                best_grade = _grade(
+                    ci, co, cs, cwf, wf_required=True, fwd=fwd, fwd_required=True, week=cweek
+                )
+                best_grade["recent"] = best_recent
+                best_grade["week"] = cweek
+                promote_reason = "silence_rotate"
+                silence_rotate = True
+                log.info(
+                    "silence rotate · paper idle %.1fh · Live-only deploy %s %sx@%s "
+                    "week=%+.0f%% n=%d (champion_peak untouched)",
+                    idle_h,
+                    cand.strategy,
+                    int(cand.leverage),
+                    cand.timeframe,
+                    cret * 100,
+                    int(wn),
+                )
+                break
+            if not silence_rotate:
+                log.info(
+                    "silence rotate skipped · idle %.1fh · no candidate cleared "
+                    "floor/peak-gap (pool=%d)",
+                    idle_h,
+                    len(rotate_pool),
+                )
+        elif not silence_rotate:
+            log.info(
+                "silence rotate armed · idle %.1fh · held=%d pool=%d",
+                idle_h,
+                held,
+                len(rotate_pool),
+            )
 
     # F4 finalist: re-score holdout week on FULL paper symbol book before research promote
     require_wf = bool(HUNT_TARGETS.get("require_walk_forward", True))
@@ -1383,7 +1471,9 @@ def improve_once(
     if champion_rescue and improved:
         promote_tier = "champion_rescue"
     elif silence_rotate and improved:
-        promote_tier = "silence_rotate"
+        promote_tier = (
+            "silence_density" if promote_reason == "silence_density" else "silence_rotate"
+        )
     else:
         promote_tier = "research" if improved else "hold"
     # F3: confirmed / elite requires forward paper proof
@@ -1592,29 +1682,28 @@ def improve_once(
         decision["promote_tier"] = "confirmed"
         state["forward_since"] = decision["ts"]
 
-    # Champion floor: only raise, never lower — except silence_rotate, which must
-    # replace a ghost high-week champion that left paper with zero live setups.
-    if improved:
-        new_week = float(best_week.get("ret") or 0)
-        old_week = float((champion or {}).get("week_ret") or -999)
-        if silence_rotate or new_week >= old_week - 0.0005:
-            state["champion"] = {
-                "ts": decision["ts"],
-                "generation": generation,
-                "week_ret": new_week,
-                "score": raw_score,
-                "knobs": knobs,
-                "week": best_week,
-                **(
-                    {"week_ret_peak": max(old_week, new_week), "silence_rotate": True}
-                    if silence_rotate
-                    else {}
-                ),
-            }
-        elif champion:
-            state["champion"] = champion
+    # Live book vs peak champion: silence only patches Live; peak is raise-only.
+    live_knobs = knobs if improved else _cfg_to_knobs(base)
+    state["live_deployed"] = {
+        "ts": decision["ts"],
+        "generation": generation,
+        "week_ret": float((best_week if improved else base_week).get("ret") or 0),
+        "knobs": live_knobs,
+        "promote_reason": promote_reason if improved else "hold",
+        "promote_tier": decision.get("promote_tier"),
+    }
+    if improved and not silence_rotate:
+        champion = _raise_champion_peak(
+            state,
+            knobs=knobs,
+            week_ret=float(best_week.get("ret") or 0),
+            score=raw_score,
+            week=best_week,
+            ts=decision["ts"],
+            generation=generation,
+        )
     elif champion:
-        state["champion"] = champion
+        _sync_champion_peak(state, champion)
     hist = list(state.get("history") or [])
     hist.append(
         {
@@ -1643,19 +1732,24 @@ def improve_once(
             "recent_ok": best_recent_ok,
             "week_return": best_week.get("ret"),
             "targets_met": best_grade["targets_met"],
-            "strategy": knobs.get("strategy"),
-            "timeframe": knobs.get("timeframe"),
-            "leverage": knobs.get("leverage"),
-            "adx_enter": knobs["adx_enter"],
-            "volume_multiplier": knobs["volume_multiplier"],
-            "risk_pct": knobs.get("risk_pct"),
-            "mom_lookback": knobs.get("mom_lookback"),
-            "mom_min_atr": knobs.get("mom_min_atr"),
-            "require_squeeze": knobs.get("require_squeeze"),
-            "require_rsi_veto": knobs.get("require_rsi_veto"),
-            "require_btc_regime": knobs.get("require_btc_regime"),
-            # Full knobs so a blocked climb can be restored later
+            # Deployed book (not best rejected candidate) — chart colors use these
+            "strategy": live_knobs.get("strategy"),
+            "timeframe": live_knobs.get("timeframe"),
+            "leverage": live_knobs.get("leverage"),
+            "deployed_leverage": live_knobs.get("leverage"),
+            "adx_enter": live_knobs.get("adx_enter", knobs.get("adx_enter")),
+            "volume_multiplier": live_knobs.get(
+                "volume_multiplier", knobs.get("volume_multiplier")
+            ),
+            "risk_pct": live_knobs.get("risk_pct"),
+            "mom_lookback": live_knobs.get("mom_lookback"),
+            "mom_min_atr": live_knobs.get("mom_min_atr"),
+            "require_squeeze": live_knobs.get("require_squeeze"),
+            "require_rsi_veto": live_knobs.get("require_rsi_veto"),
+            "require_btc_regime": live_knobs.get("require_btc_regime"),
+            # Full candidate knobs so a blocked climb can be restored later
             "knobs": knobs,
+            "deployed_knobs": live_knobs,
             "leverage_ladder": leverage_ladder,
         }
     )

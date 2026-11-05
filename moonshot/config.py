@@ -100,6 +100,11 @@ class Config:
     squeeze_lookback: int = 8  # squeeze must have fired within this many bars
     require_squeeze: bool = False
     require_btc_regime: bool = True
+    # Higher-TF entry gates (Momentum15 / hunt-optional; default off for back-compat)
+    require_h4_bias: bool = False
+    require_daily_align: bool = False
+    require_weekly_bias: bool = False
+    ema_weekly_period: int = 10
 
     # time stop — dump stagnant trades that never reach +min_r (hunt-optional)
     enable_time_stop: bool = False
@@ -210,6 +215,10 @@ class Config:
             squeeze_lookback=int(os.getenv("SQUEEZE_LOOKBACK", "8")),
             require_squeeze=os.getenv("REQUIRE_SQUEEZE", "0") == "1",
             require_btc_regime=os.getenv("REQUIRE_BTC_REGIME", "1") == "1",
+            require_h4_bias=os.getenv("REQUIRE_H4_BIAS", "0") == "1",
+            require_daily_align=os.getenv("REQUIRE_DAILY_ALIGN", "0") == "1",
+            require_weekly_bias=os.getenv("REQUIRE_WEEKLY_BIAS", "0") == "1",
+            ema_weekly_period=int(os.getenv("EMA_WEEKLY_PERIOD", "10")),
             enable_time_stop=os.getenv("ENABLE_TIME_STOP", "1") == "1",
             time_stop_bars=int(os.getenv("TIME_STOP_BARS", "8")),
             time_stop_min_r=float(os.getenv("TIME_STOP_MIN_R", "1.0")),

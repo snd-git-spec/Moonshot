@@ -208,7 +208,19 @@ if run_cfg is not None:
                 tuple(symbols), int(run_cfg["bars"]), cfg.timeframe,
                 bool(run_cfg["synthetic"]), bool(run_cfg["refresh"]),
             )
-            data = ms.prepare_data(raw, cfg)
+            context = None
+            if ms.needs_btc_regime_context(symbols, cfg):
+                btc = ms.default_btc_symbol()
+                if bool(run_cfg["synthetic"]):
+                    context = {btc: ms.synthetic_ohlcv(btc, int(run_cfg["bars"]), cfg.timeframe)}
+                else:
+                    context = {
+                        btc: ms.fetch_historical(
+                            btc, cfg.timeframe, int(run_cfg["bars"]),
+                            refresh=bool(run_cfg["refresh"]),
+                        )
+                    }
+            data = ms.prepare_data(raw, cfg, context=context)
         except ms.BotError as e:
             st.error(
                 f"Could not load prices: {e}. "

@@ -26,8 +26,11 @@ from moonshot.hunt.constants import (
     HUNT_BAN_WEEK_FLOOR,
     HUNT_BREAKOUT_N,
     HUNT_EXPLORE_N,
+    HUNT_LEV15_MIN_SOFT_TRADES,
+    HUNT_LEV15_MIN_WEEK_TRADES,
+    HUNT_LEV25_MIN_SOFT_TRADES,
+    HUNT_LEV25_MIN_WEEK_TRADES,
     HUNT_LEV_BREAKOUT,
-    HUNT_LEV_FORCE,
     HUNT_LEV_POLISH,
     HUNT_STRATEGIES,
     HUNT_STUCK_HELD,
@@ -72,14 +75,11 @@ def _freeze_risk(base: Config, c: Config) -> Config:
     if aggressive:
         lev = int(max(5, min(25, int(getattr(c, "leverage", base.leverage) or base.leverage))))
         # 25x only on short clocks
-        if lev >= 25 and tf == "15m":
+        # Fixed lev×TF matrix: 25x only on 5m; 15x@15m kept but density-gated later
+        if lev >= 25 and tf != "5m":
             tf = "5m"
-            lev = 25
-        if lev >= 15 and tf == "15m":
-            # allow 15x@15m but prefer not forcing; keep as sampled
-            pass
-        # Risk / book size scale down with leverage
-        # Keep enough concurrent slots — density dies if open_hi is 2–4 on a 10-coin book
+        # Risk / book size scale DOWN with leverage (never inflate risk with lev)
+        base_risk = float(getattr(base, "risk_pct", 0.02) or 0.02)
         if lev >= 25:
             risk_hi, open_hi, stop_lo = 0.02, 4, 2.5
         elif lev >= 15:
@@ -88,7 +88,10 @@ def _freeze_risk(base: Config, c: Config) -> Config:
             risk_hi, open_hi, stop_lo = 0.03, 8, 2.0
         else:
             risk_hi, open_hi, stop_lo = 0.05, 8, 1.5
-        risk = float(max(0.015, min(risk_hi, c.risk_pct)))
+        risk = float(max(0.015, min(risk_hi, float(c.risk_pct))))
+        if lev > int(getattr(base, "leverage", lev) or lev):
+            # Climbing leverage must not raise risk_pct vs the source book
+            risk = float(min(risk, base_risk))
         max_open = int(
             max(
                 1,
@@ -101,12 +104,8 @@ def _freeze_risk(base: Config, c: Config) -> Config:
                 ),
             )
         )
-        max_acct = float(
-            max(lev, min(25.0, float(getattr(c, "max_account_leverage", float(lev)) or lev)))
-        )
-        max_net = float(
-            max(lev, min(25.0, float(getattr(c, "max_net_leverage", float(lev)) or lev)))
-        )
+        max_acct = float(min(25.0, float(lev)))
+        max_net = float(min(25.0, float(lev)))
         stop_atr = float(max(stop_lo, min(4.0, c.initial_stop_atr)))
     else:
         lev = int(base.leverage)
@@ -186,6 +185,12 @@ def _freeze_risk(base: Config, c: Config) -> Config:
         enable_pyramiding=bool(base.enable_pyramiding),
         timeframe=tf,
         require_btc_regime=bool(c.require_btc_regime),
+        require_h4_bias=bool(getattr(c, "require_h4_bias", False)),
+        require_daily_align=bool(getattr(c, "require_daily_align", False)),
+        require_weekly_bias=bool(getattr(c, "require_weekly_bias", False)),
+        ema_weekly_period=int(
+            max(2, min(30, int(getattr(c, "ema_weekly_period", 10) or 10)))
+        ),
         require_rising_adx=bool(c.require_rising_adx),
         require_squeeze=bool(c.require_squeeze),
         require_rsi_veto=bool(c.require_rsi_veto),
@@ -217,6 +222,74 @@ def _freeze_risk(base: Config, c: Config) -> Config:
         time_stop_bars=int(max(4, min(48, c.time_stop_bars))),
         mom_lookback=int(max(3, min(24, c.mom_lookback))),
         mom_min_atr=float(max(0.25, min(2.0, c.mom_min_atr))),
+    )
+
+
+def knobs_to_cfg(kn: dict, base: Optional[Config] = None) -> Config:
+    """Rebuild a Config from hunt/champion knobs (shared by hunt + Live UI)."""
+    base = base or Config.from_env()
+    kn = kn or {}
+    return _freeze_risk(
+        base,
+        replace(
+            base,
+            strategy=str(kn.get("strategy", base.strategy)),
+            timeframe=str(kn.get("timeframe", base.timeframe)),
+            adx_enter=float(kn["adx_enter"]),
+            adx_exit=float(kn.get("adx_exit", float(kn["adx_enter"]) - 6)),
+            volume_multiplier=float(kn["volume_multiplier"]),
+            breakout_buffer_atr=float(kn.get("breakout_buffer_atr", base.breakout_buffer_atr)),
+            breakout_lookback=int(kn.get("breakout_lookback", base.breakout_lookback)),
+            trail_atr_multiple=float(kn.get("trail_atr", base.trail_atr_multiple)),
+            initial_stop_atr=float(kn.get("initial_stop_atr", base.initial_stop_atr)),
+            cooldown_bars=int(kn.get("cooldown_bars", base.cooldown_bars)),
+            require_rising_adx=bool(kn.get("require_rising_adx", base.require_rising_adx)),
+            require_squeeze=bool(kn.get("require_squeeze", base.require_squeeze)),
+            require_rsi_veto=bool(kn.get("require_rsi_veto", base.require_rsi_veto)),
+            require_btc_regime=bool(kn.get("require_btc_regime", base.require_btc_regime)),
+            require_h4_bias=bool(kn.get("require_h4_bias", base.require_h4_bias)),
+            require_daily_align=bool(kn.get("require_daily_align", base.require_daily_align)),
+            require_weekly_bias=bool(kn.get("require_weekly_bias", base.require_weekly_bias)),
+            ema_weekly_period=int(kn.get("ema_weekly_period", base.ema_weekly_period)),
+            rsi_long_max=float(kn.get("rsi_long_max", base.rsi_long_max)),
+            rsi_short_min=float(kn.get("rsi_short_min", base.rsi_short_min)),
+            squeeze_lookback=int(kn.get("squeeze_lookback", base.squeeze_lookback)),
+            enable_partial=bool(kn.get("enable_partial", base.enable_partial)),
+            partial_at_r=float(kn.get("partial_at_r", base.partial_at_r)),
+            partial_pct=float(kn.get("partial_pct", base.partial_pct)),
+            enable_time_stop=bool(kn.get("enable_time_stop", base.enable_time_stop)),
+            time_stop_bars=int(kn.get("time_stop_bars", base.time_stop_bars)),
+            time_stop_min_r=float(kn.get("time_stop_min_r", base.time_stop_min_r)),
+            trail_atr_loser=float(kn.get("trail_atr_loser", base.trail_atr_loser)),
+            use_asymmetric_trail=bool(kn.get("use_asymmetric_trail", base.use_asymmetric_trail)),
+            risk_pct=float(kn.get("risk_pct", base.risk_pct)),
+            initial_margin_pct=float(kn.get("initial_margin_pct", base.initial_margin_pct)),
+            aggressive_margin_pct=float(
+                kn.get("aggressive_margin_pct", base.aggressive_margin_pct)
+            ),
+            max_daily_loss_pct=float(kn.get("max_daily_loss_pct", base.max_daily_loss_pct)),
+            max_peak_drawdown_pct=float(
+                kn.get("max_peak_drawdown_pct", base.max_peak_drawdown_pct)
+            ),
+            mom_lookback=int(kn.get("mom_lookback", base.mom_lookback)),
+            mom_min_atr=float(kn.get("mom_min_atr", base.mom_min_atr)),
+            leverage=int(kn.get("leverage", base.leverage)),
+            max_account_leverage=float(
+                kn.get("max_account_leverage", base.max_account_leverage)
+            ),
+            max_net_leverage=float(kn.get("max_net_leverage", base.max_net_leverage)),
+            max_open_positions=int(kn.get("max_open_positions", base.max_open_positions)),
+            h4_ema_fast=int(kn.get("h4_ema_fast", base.h4_ema_fast)),
+            h4_ema_slow=int(kn.get("h4_ema_slow", base.h4_ema_slow)),
+            ema_entry_period=int(kn.get("ema_entry_period", base.ema_entry_period)),
+            pullback_lookback=int(kn.get("pullback_lookback", base.pullback_lookback)),
+            btc_adx_min=float(kn.get("btc_adx_min", base.btc_adx_min)),
+            breadth_min=float(kn.get("breadth_min", base.breadth_min)),
+            starting_equity=float(
+                getattr(base, "research_starting_equity", base.starting_equity)
+                or base.starting_equity
+            ),
+        ),
     )
 
 
@@ -284,6 +357,9 @@ def _cfg_fingerprint(cfg: Config) -> tuple:
         bool(cfg.require_squeeze),
         bool(cfg.require_rsi_veto),
         bool(cfg.require_btc_regime),
+        bool(getattr(cfg, "require_h4_bias", False)),
+        bool(getattr(cfg, "require_daily_align", False)),
+        bool(getattr(cfg, "require_weekly_bias", False)),
         bool(cfg.use_asymmetric_trail),
         bool(cfg.enable_partial),
         bool(cfg.enable_time_stop),
@@ -365,7 +441,7 @@ def _filter_banned(cfgs: list, banned: set[str]) -> tuple[list, int]:
 def _champion_from_history(hist_rows: list, current: dict | None) -> dict | None:
     """Keep the highest holdout-week knobs ever seen — never let a wipe lower the floor."""
     best = dict(current) if isinstance(current, dict) and current.get("knobs") else None
-    best_w = float((best or {}).get("week_ret") or -999)
+    best_w = float((best or {}).get("week_ret_peak") or (best or {}).get("week_ret") or -999)
     for row in hist_rows or []:
         wr = row.get("week_return")
         kn = row.get("knobs") if isinstance(row.get("knobs"), dict) else None
@@ -381,11 +457,107 @@ def _champion_from_history(hist_rows: list, current: dict | None) -> dict | None
                 "ts": row.get("ts"),
                 "generation": row.get("generation"),
                 "week_ret": wr_f,
+                "week_ret_peak": wr_f,
                 "score": row.get("score"),
                 "knobs": kn,
                 "week": row.get("week") if isinstance(row.get("week"), dict) else None,
             }
     return best
+
+
+def _resolve_champion_peak(state: dict) -> dict | None:
+    """Peak holdout champion — prefer champion_peak, else champion (+ history raise)."""
+    peak = state.get("champion_peak") if isinstance(state.get("champion_peak"), dict) else None
+    champ = state.get("champion") if isinstance(state.get("champion"), dict) else None
+    hist = list(state.get("history") or [])
+    merged = _champion_from_history(hist, peak or champ)
+    if not merged:
+        return None
+    # Preserve highest peak ever recorded on the blob
+    peak_w = float(merged.get("week_ret_peak") or merged.get("week_ret") or -999)
+    for src in (peak, champ):
+        if not isinstance(src, dict):
+            continue
+        try:
+            peak_w = max(peak_w, float(src.get("week_ret_peak") or src.get("week_ret") or -999))
+        except (TypeError, ValueError):
+            pass
+    out = dict(merged)
+    out["week_ret_peak"] = peak_w
+    if float(out.get("week_ret") or -999) < peak_w - 0.0005 and peak and peak.get("knobs"):
+        # Peak week_ret may have been clobbered; restore knobs from champion_peak if better
+        try:
+            if float(peak.get("week_ret_peak") or peak.get("week_ret") or -999) >= peak_w - 0.0005:
+                out["knobs"] = dict(peak.get("knobs") or out.get("knobs") or {})
+                out["week_ret"] = float(peak.get("week_ret_peak") or peak.get("week_ret") or peak_w)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _sync_champion_peak(state: dict, peak: dict | None) -> None:
+    """Write champion_peak and keep legacy ``champion`` alias in sync for UI."""
+    if not peak or not peak.get("knobs"):
+        return
+    blob = dict(peak)
+    blob["week_ret_peak"] = float(
+        blob.get("week_ret_peak") or blob.get("week_ret") or 0
+    )
+    state["champion_peak"] = blob
+    state["champion"] = dict(blob)
+
+
+def _raise_champion_peak(
+    state: dict,
+    *,
+    knobs: dict,
+    week_ret: float,
+    score: int | float | None,
+    week: dict | None,
+    ts: str,
+    generation: int,
+) -> dict:
+    """Raise-only update to peak champion (never from silence_rotate)."""
+    prev = _resolve_champion_peak(state)
+    old_peak = float((prev or {}).get("week_ret_peak") or (prev or {}).get("week_ret") or -999)
+    new_w = float(week_ret)
+    if prev and new_w < old_peak - 0.0005:
+        _sync_champion_peak(state, prev)
+        return prev
+    blob = {
+        "ts": ts,
+        "generation": generation,
+        "week_ret": new_w,
+        "week_ret_peak": max(old_peak, new_w),
+        "score": score,
+        "knobs": knobs,
+        "week": week,
+    }
+    _sync_champion_peak(state, blob)
+    return blob
+
+
+def _density_polish_cfgs(peak_cfg: Config) -> list:
+    """One-notch looser filters around peak — prefer densifying before family swap."""
+    out = []
+    adx = float(peak_cfg.adx_enter)
+    vol = float(peak_cfg.volume_multiplier)
+    for adx_n, sq, vol_n in (
+        (max(10.0, adx - 2.0), peak_cfg.require_squeeze, vol),
+        (adx, False, vol),
+        (adx, peak_cfg.require_squeeze, max(1.0, round(vol * 0.9, 3))),
+        (max(10.0, adx - 2.0), False, max(1.0, round(vol * 0.9, 3))),
+    ):
+        out.append(
+            replace(
+                peak_cfg,
+                adx_enter=float(adx_n),
+                adx_exit=min(float(peak_cfg.adx_exit), float(adx_n) - 2.0),
+                require_squeeze=bool(sq),
+                volume_multiplier=float(vol_n),
+            )
+        )
+    return _dedupe_cfgs(peak_cfg, out)
 
 
 def _material_research_edge(
@@ -569,23 +741,34 @@ def _polish_cfgs(base: Config) -> list:
     seeds.append(replace(base, require_btc_regime=not bool(base.require_btc_regime)))
     seeds.append(replace(base, require_rising_adx=not bool(base.require_rising_adx)))
     seeds.append(replace(base, use_asymmetric_trail=not bool(base.use_asymmetric_trail)))
-    # Leverage dial (aggressive only) — 5/7/10 in polish; 15/25 in breakout
+    # HTF gate flips (polish seeds on — hunt can turn them off)
+    seeds.append(replace(base, require_h4_bias=True))
+    seeds.append(replace(base, require_daily_align=True))
+    seeds.append(replace(base, require_weekly_bias=True))
+    seeds.append(
+        replace(base, require_h4_bias=True, require_daily_align=True, require_weekly_bias=True)
+    )
+    seeds.append(
+        replace(
+            base,
+            require_h4_bias=not bool(getattr(base, "require_h4_bias", False)),
+        )
+    )
+    # Leverage dial (aggressive only) — matrix-constrained
     if bool(getattr(base, "aggressive_mode", False)):
         for lev in HUNT_LEV_POLISH:
             if lev == int(base.leverage):
                 continue
-            tf = base.timeframe
-            if lev >= 25:
-                tf = "5m" if str(base.timeframe) == "15m" else base.timeframe
-            elif lev >= 10 and str(base.timeframe) == "15m":
-                tf = base.timeframe  # 10x may stay 15m; breakout samples 5m
+            tf = _tf_for_leverage(int(lev), str(base.timeframe))
+            if not _lev_tf_allowed(int(lev), str(tf)):
+                continue
             seeds.append(
                 replace(
                     base,
                     leverage=lev,
                     timeframe=str(tf),
-                    max_account_leverage=float(max(lev, float(base.max_account_leverage))),
-                    max_net_leverage=float(max(lev, float(base.max_net_leverage))),
+                    max_account_leverage=float(lev),
+                    max_net_leverage=float(lev),
                 )
             )
         for n_open in (2, 3, 4, 5, 6):
@@ -651,18 +834,11 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     n_open = int(rng.choice(open_opts))
     strat = str(rng.choice(strat_opts))
     # Prefer faster clocks so more setups exist per day — never 3m (1m resample).
-    if lev >= 15:
-        tf = "5m"
-    elif lev >= 10:
-        tf = str(rng.choice(["5m", "5m", "15m"]))
-    else:
-        tf = (
-            str(rng.choice(["5m", "15m", "15m"]))
-            if wide
-            else (str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m")
-        )
-        if rng.random() < 0.35:
-            tf = "5m"
+    tf = _tf_for_leverage(int(lev), str(base.timeframe))
+    if wide and rng.random() < 0.4:
+        tf = str(rng.choice(["5m", "15m"]))
+        if not _lev_tf_allowed(int(lev), tf):
+            tf = _tf_for_leverage(int(lev), tf)
     return replace(
         base,
         strategy=strat,
@@ -679,6 +855,9 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
         require_squeeze=not rng.random() < 0.9,
         require_rsi_veto=not rng.random() < 0.85,
         require_btc_regime=bool(rng.choice([True, False, False])),
+        require_h4_bias=bool(rng.choice([False, False, True])),
+        require_daily_align=bool(rng.choice([False, False, True])),
+        require_weekly_bias=bool(rng.choice([False, False, True])),
         breakout_lookback=int(rng.choice(bo_lb_opts)),
         breakout_buffer_atr=float(rng.choice(bo_buf_opts)),
         h4_adx_min_short=float(rng.choice(h4_adx_opts)),
@@ -699,8 +878,8 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
         mom_lookback=int(rng.choice(mom_lb_opts)),
         mom_min_atr=float(rng.choice(mom_thr_opts)),
         leverage=lev,
-        max_account_leverage=float(max(lev, float(base.max_account_leverage))),
-        max_net_leverage=float(max(lev, float(base.max_net_leverage))),
+        max_account_leverage=float(lev),
+        max_net_leverage=float(lev),
         max_open_positions=n_open,
     )
 
@@ -737,36 +916,88 @@ def _breakout_cfgs(base: Config, generation: int) -> list:
     return seeds
 
 
-def _tf_for_leverage(lev: int, base_tf: str) -> str:
-    """Pair high leverage with faster clocks so 25x is actually testable.
+def _lev_tf_allowed(lev: int, tf: str) -> bool:
+    """Fixed leverage × timeframe matrix (before density gates)."""
+    lev = int(lev)
+    tf = str(tf or "").strip().lower()
+    if tf == "5m":
+        return lev in (5, 7, 10, 15, 25)
+    if tf == "15m":
+        return lev in (5, 7, 10, 15)  # no 25@15m
+    return lev in (5, 7, 10)
 
-    Hunt never uses 3m (1m-resample cost). 15/25× → 5m; ≤10× keep base TF.
+
+def _tf_for_leverage(lev: int, base_tf: str) -> str:
+    """Map leverage onto an allowed TF in the fixed matrix.
+
+    25× always 5m; 15× may stay on 15m (density-gated later) or use 5m.
     """
     lev = int(lev)
     bt = str(base_tf or "15m").strip().lower()
     if bt not in HUNT_TF_ALLOW:
         bt = "15m"
-    if lev >= 15:
+    if lev >= 25:
         return "5m"
-    return bt
+    if _lev_tf_allowed(lev, bt):
+        return bt
+    return "5m" if lev >= 15 else bt
+
+
+def _lev_density_ok(
+    lev: int,
+    week: dict | None,
+    *,
+    dual_ok: bool = False,
+    tf: str | None = None,
+) -> bool:
+    """High leverage requires setup density (holdout week + soft trade counts)."""
+    lev = int(lev)
+    week = week or {}
+    wn = int(week.get("trades") or 0)
+    wsn = int(week.get("soft_trades") or 0)
+    if lev >= 25:
+        return wn >= int(HUNT_LEV25_MIN_WEEK_TRADES) or wsn >= int(HUNT_LEV25_MIN_SOFT_TRADES)
+    if lev >= 15:
+        dense = wn >= int(HUNT_LEV15_MIN_WEEK_TRADES) or wsn >= int(HUNT_LEV15_MIN_SOFT_TRADES)
+        # 15x@15m only with high density + dual-week OK
+        if str(tf or "").strip().lower() == "15m":
+            return dense and bool(dual_ok)
+        return dense
+    return True
 
 
 def _leverage_ladder_cfgs(base: Config) -> list:
-    """Explicit 5x/10x/15x/25x clones of the *current* book — one cfg per lev."""
+    """Fixed lev×TF matrix clones of the current book (not a free rainbow)."""
     seeds = []
-    for lev in HUNT_LEV_FORCE:
-        tf = _tf_for_leverage(int(lev), str(base.timeframe))
+    bt = str(base.timeframe or "15m").strip().lower()
+    if bt not in HUNT_TF_ALLOW:
+        bt = "15m"
+    # Allowed levs at the book's TF
+    allowed = (5, 7, 10, 15, 25) if bt == "5m" else (5, 7, 10, 15)
+    for lev in allowed:
+        if not _lev_tf_allowed(int(lev), bt):
+            continue
         seeds.append(
             replace(
                 base,
                 leverage=int(lev),
-                timeframe=tf,
-                max_account_leverage=float(max(float(lev), float(base.max_account_leverage))),
-                max_net_leverage=float(
-                    max(float(lev), float(getattr(base, "max_net_leverage", lev)))
-                ),
+                timeframe=bt,
+                max_account_leverage=float(lev),
+                max_net_leverage=float(lev),
             )
         )
+    # If book is 15m, also probe 5m high-lev slots from the matrix
+    if bt == "15m":
+        for lev in (15, 25):
+            seeds.append(
+                replace(
+                    base,
+                    leverage=int(lev),
+                    timeframe="5m",
+                    max_account_leverage=float(lev),
+                    max_net_leverage=float(lev),
+                )
+            )
     return seeds
 
 
@@ -816,6 +1047,7 @@ def _feature_cache_key(cfg: Config) -> tuple:
         float(cfg.kc_atr_mult),
         int(cfg.squeeze_lookback),
         bool(cfg.require_btc_regime),
+        int(getattr(cfg, "ema_weekly_period", 10) or 10),
     )
 
 

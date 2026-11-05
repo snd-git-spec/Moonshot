@@ -49,6 +49,8 @@ from moonshot.hunt.autopilot import (
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
+    from moonshot.features import default_btc_symbol, needs_btc_regime_context
+
     cfg = Config.from_env()
     symbols = args.symbols or DEFAULT_SYMBOLS
     if args.synthetic:
@@ -58,7 +60,17 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         raw = {
             s: fetch_historical(s, cfg.timeframe, args.bars, refresh=args.refresh) for s in symbols
         }
-    data = prepare_data(raw, cfg)
+    context = None
+    if needs_btc_regime_context(symbols, cfg):
+        btc = default_btc_symbol()
+        if args.synthetic:
+            context = {btc: synthetic_ohlcv(btc, args.bars)}
+        else:
+            context = {
+                btc: fetch_historical(btc, cfg.timeframe, args.bars, refresh=args.refresh)
+            }
+        print(f"(BTC regime context loaded for filter parity; not traded: {btc})")
+    data = prepare_data(raw, cfg, context=context)
     t0 = min(sd.bars[0].Index for sd in data.values())
     t1 = max(sd.bars[-1].Index for sd in data.values())
     split = t0 + (t1 - t0) * (1 - args.oos)

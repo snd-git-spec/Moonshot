@@ -168,6 +168,18 @@ def build_features(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     f["h4_adx"] = h4_prev["h4_adx"]
     f["h4_bias"] = h4_prev["h4_bias"].fillna(0.0)
 
+    # Completed weekly bias (no lookahead): close vs weekly EMA on closed weeks only
+    weekly = resample_ohlcv(f, "1W")
+    w_period = max(2, int(getattr(cfg, "ema_weekly_period", 10) or 10))
+    weekly["ema_w"] = ema(weekly["close"], w_period)
+    w_prev = weekly[["close", "ema_w"]].shift(1).rename(columns={"close": "w_close"})
+    w_prev = w_prev.reindex(f.index, method="ffill")
+    f["w_close"] = w_prev["w_close"]
+    f["w_ema"] = w_prev["ema_w"]
+    w_up = (f["w_close"] > f["w_ema"]).fillna(False)
+    w_dn = (f["w_close"] < f["w_ema"]).fillna(False)
+    f["weekly_bias"] = np.where(w_up, 1.0, np.where(w_dn, -1.0, 0.0))
+
     valid = f[["ema_htf", "atr", "adx", "d_ema"]].notna().all(axis=1).to_numpy()
     adx_on = hysteresis(f["adx"].to_numpy(), cfg.adx_enter, cfg.adx_exit)
     up = adx_on & (f["close"] > f["ema_htf"]).to_numpy() & (f["d_close"] > f["d_ema"]).to_numpy()
@@ -228,9 +240,30 @@ def prepare_symbol(
     )
 
 
-def prepare_data(raw: dict, cfg: Config) -> dict:
-    """Build per-symbol features; stamp BTC trend onto alts when enabled."""
-    feats = {s: build_features(df, cfg) for s, df in raw.items()}
+def default_btc_symbol() -> str:
+    """Canonical BTC perp used for regime context when the book has no BTC."""
+    return "BTC/USDT:USDT"
+
+
+def needs_btc_regime_context(symbols, cfg: Config) -> bool:
+    """True when alt-only selection would silently block every entry."""
+    return bool(getattr(cfg, "require_btc_regime", False)) and _btc_symbol_in(symbols) is None
+
+
+def prepare_data(raw: dict, cfg: Config, context: Optional[dict] = None) -> dict:
+    """Build per-symbol features; stamp BTC trend onto alts when enabled.
+
+    ``context`` is optional OHLCV used only for market regime / breadth
+    (typically BTC when the user picked alt-only). Context symbols are
+    **not** returned and therefore not traded by BacktestEngine.
+    """
+    tradable = set(raw.keys())
+    merged = dict(raw)
+    if context:
+        for s, df in context.items():
+            if s not in merged:
+                merged[s] = df
+    feats = {s: build_features(df, cfg) for s, df in merged.items()}
     btc = _btc_symbol_in(feats.keys())
     if cfg.require_btc_regime and btc is not None:
         # Prefer completed 4H bias for MTF; fall back to 15m/daily regime map
@@ -244,6 +277,10 @@ def prepare_data(raw: dict, cfg: Config) -> dict:
             else:
                 # Align on timestamp; forward-fill so missing BTC bars don't flash 0 mid-trend
                 f["btc_trend"] = btc_trend.reindex(f.index).ffill().fillna(0.0)
+    elif cfg.require_btc_regime and btc is None and tradable:
+        log.warning(
+            "require_btc_regime on but no BTC in book/context — alt entries will be blocked"
+        )
     # Market-wide context (no lookahead: values at bar close). Used by chop filters.
     if btc is not None:
         btc_adx = feats[btc]["adx"].astype(float)
@@ -253,4 +290,8 @@ def prepare_data(raw: dict, cfg: Config) -> dict:
     for f in feats.values():
         f["btc_adx"] = btc_adx.reindex(f.index).ffill().fillna(0.0)
         f["breadth"] = breadth.reindex(f.index).ffill().fillna(0.0)
-    return {s: prepare_symbol(s, raw[s], cfg, feats=f) for s, f in feats.items()}
+    return {
+        s: prepare_symbol(s, merged[s], cfg, feats=feats[s])
+        for s in tradable
+        if s in feats and s in merged
+    }

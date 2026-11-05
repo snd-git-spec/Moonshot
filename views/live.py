@@ -22,6 +22,12 @@ from dash_lib import (
 
 inject_theme()
 
+try:
+    from moonshot.hunt.scoring import WEEK_DAYS as _HOLD_DAYS
+except Exception:
+    _HOLD_DAYS = 7
+_HOLDOUT = f"holdout {_HOLD_DAYS}d"
+
 # Compact terminal header — balance filled after state loads inside the fragment
 _boot_eq = load_equity(detect_mode(load_equity(None)))
 _boot_bal = float(_boot_eq["equity"].iloc[-1]) if not _boot_eq.empty else None
@@ -36,6 +42,123 @@ page_header(
 
 def _parse_ts(value):
     return pd.to_datetime(value, utc=True, format="ISO8601", errors="coerce")
+
+
+def _history_week_ret(row: dict) -> float | None:
+    if not isinstance(row, dict):
+        return None
+    wr = row.get("week_return")
+    if wr is None:
+        wr = (row.get("grade") or {}).get("week_return")
+    if wr is None:
+        week = row.get("week") or (row.get("grade") or {}).get("week") or {}
+        if isinstance(week, dict) and week.get("ret") is not None:
+            wr = week.get("ret")
+    try:
+        return float(wr) if wr is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _peak_champion_knobs(state: dict) -> dict | None:
+    """Knobs for the best holdout book — prefer champion_peak; recover if clobbered."""
+    peak_blob = state.get("champion_peak") if isinstance(state.get("champion_peak"), dict) else None
+    ch = peak_blob or (state.get("champion") if isinstance(state.get("champion"), dict) else {})
+    if not ch:
+        return None
+    knobs = dict(ch.get("knobs") or {})
+    if not knobs:
+        return None
+    peak = ch.get("week_ret_peak")
+    try:
+        peak_f = float(peak) if peak is not None else None
+    except (TypeError, ValueError):
+        peak_f = None
+    cur = None
+    try:
+        cur = float(ch.get("week_ret")) if ch.get("week_ret") is not None else None
+    except (TypeError, ValueError):
+        cur = None
+    need_recover = (not peak_blob) and (
+        bool(ch.get("silence_rotate"))
+        or (peak_f is not None and cur is not None and abs(cur - peak_f) > 0.005)
+    )
+    if need_recover and peak_f is not None:
+        best_row = None
+        best_gap = 1e9
+        for h in state.get("history") or []:
+            wr = _history_week_ret(h)
+            if wr is None or not (h.get("knobs") or {}):
+                continue
+            gap = abs(float(wr) - peak_f)
+            if gap < best_gap:
+                best_gap = gap
+                best_row = h
+        if best_row is not None and best_gap < 0.02:
+            knobs = dict(best_row.get("knobs") or knobs)
+    return knobs or None
+
+
+def _week_end_from_span(span: str | None) -> pd.Timestamp:
+    """Parse 'YYYY-MM-DD → YYYY-MM-DD' end date; fall back to now UTC.
+
+    Span end is the same ``end`` stamp ``_week_eval`` prints — do not +1 day.
+    """
+    try:
+        if span and "→" in str(span):
+            end_s = str(span).split("→")[-1].strip()
+            return pd.Timestamp(end_s, tz="UTC")
+    except Exception:
+        pass
+    return pd.Timestamp.now(tz="UTC")
+
+
+@st.cache_data(ttl=600, show_spinner="Scoring champion on the same week…")
+def _champion_same_week(
+    knobs_json: str,
+    end_iso: str,
+    start_eq: float,
+) -> dict:
+    """Replay champion knobs on the same holdout window as the Live setup tile."""
+    from moonshot.hunt.scoring import WEEK_DAYS, _week_eval, knobs_to_cfg
+    from moonshot.features import default_btc_symbol, needs_btc_regime_context
+
+    from dataclasses import replace as _dc_replace
+
+    knobs = json.loads(knobs_json)
+    cfg = _dc_replace(knobs_to_cfg(knobs), starting_equity=float(start_eq))
+    end = pd.Timestamp(end_iso)
+    if end.tzinfo is None:
+        end = end.tz_localize("UTC")
+    else:
+        end = end.tz_convert("UTC")
+    start = end - pd.Timedelta(days=int(WEEK_DAYS) + 2)
+    tf = str(cfg.timeframe)
+    warm = int(ms.range_warmup_bars(tf))
+    symbols = list(ms.DEFAULT_SYMBOLS)
+    # Hunt grades week on Binance spot — match that so Live vs champion is fair.
+    src = str(getattr(ms, "RANGE_SOURCE_BINANCE_SPOT", "binance_spot"))
+    raw = {}
+    for s in symbols:
+        raw[s] = ms.fetch_historical_range(
+            s, tf, start, end, warmup_bars=warm, source=src,
+        )
+    context = None
+    if needs_btc_regime_context(symbols, cfg):
+        btc = default_btc_symbol()
+        context = {
+            btc: ms.fetch_historical_range(
+                btc, tf, start, end, warmup_bars=warm, source=src,
+            )
+        }
+    data = ms.prepare_data(raw, cfg, context=context)
+    week = _week_eval(data, cfg, end=end)
+    return {
+        "week_ret": float(week.get("ret") or 0),
+        "trades": int(week.get("trades") or 0),
+        "span": str(week.get("span") or ""),
+        "knobs": knobs,
+    }
 
 
 def _verdict(
@@ -105,12 +228,12 @@ def _history_frame(history: list) -> pd.DataFrame:
 
 
 def _week_return_fig(history: list) -> go.Figure:
-    """7-day hard return for the current hunt era only (same reseed cut as score)."""
+    """Holdout-week hard return for the current hunt era only (same reseed cut as score)."""
     fig = go.Figure()
     df = _history_frame(history)
     if df.empty:
         fig.update_layout(**plotly_layout(
-            height=260, title="7-day path — waiting", uirevision="week-path",
+            height=260, title=f"{_HOLDOUT} path — waiting", uirevision="week-path",
         ))
         return polish_fig(fig)
 
@@ -147,24 +270,28 @@ def _week_return_fig(history: list) -> go.Figure:
         gens.append(int(row.get("generation") or 0))
         weeks.append(wr_f * 100.0)
         try:
-            li = int(row.get("leverage") or 0)
+            li = int(
+                row.get("deployed_leverage")
+                if row.get("deployed_leverage") is not None
+                else (row.get("leverage") or 0)
+            )
         except (TypeError, ValueError):
             li = 0
         marker_colors.append(_LEV_COLORS.get(li, ACCENT))
         hover_lev.append(f"{li}×" if li else "—")
     if not weeks:
         fig.update_layout(**plotly_layout(
-            kind="time", height=260, title="7-day path — no week stats yet",
+            kind="time", height=260, title="Holdout path — no week stats yet",
             uirevision="week-path",
         ))
         return polish_fig(fig)
     fig.add_trace(go.Scatter(
-        x=gens, y=weeks, name="7d %",
+        x=gens, y=weeks, name="holdout %",
         mode="lines+markers",
         line=dict(color=ACCENT, width=2),
         marker=dict(size=8, color=marker_colors, line=dict(width=1, color="#EAECEF")),
         customdata=hover_lev,
-        hovertemplate="Attempt %{x}<br>7d %{y:+.0f}%<br>Leverage %{customdata}<extra></extra>",
+        hovertemplate="Attempt %{x}<br>Holdout %{y:+.0f}%<br>Deployed lev %{customdata}<extra></extra>",
     ))
     fig.add_hline(y=100, line_dash="dot", line_color=GREEN, annotation_text="+100% goal")
     fig.add_hline(y=0, line_width=1, line_color=MUTED)
@@ -175,7 +302,7 @@ def _week_return_fig(history: list) -> go.Figure:
         uirevision="week-path",
         height=280, title=None, margin=dict(l=48, r=24, t=12, b=40),
         xaxis=dict(title="Attempt #"),
-        yaxis=dict(title="7-day return %", range=[y0 - pad, y1 + pad], fixedrange=True),
+        yaxis=dict(title="Holdout return %", range=[y0 - pad, y1 + pad], fixedrange=True),
         showlegend=False,
     ))
     return polish_fig(fig)
@@ -297,7 +424,7 @@ def _leverage_ladder_fig(ladder: list, current_lev: int | None = None) -> go.Fig
         customdata=custom,
         hovertemplate=(
             "<b>%{x}</b> · %{customdata[0]} · %{customdata[1]}<br>"
-            "7-day history %{y:+.1f}%<br>"
+            "Holdout history %{y:+.1f}%<br>"
             "%{customdata[2]} week trades · score %{customdata[3]}/100<br>"
             "win %{customdata[4]:.0f}%"
             "<extra></extra>"
@@ -328,7 +455,7 @@ def _leverage_ladder_fig(ladder: list, current_lev: int | None = None) -> go.Fig
         margin=dict(l=48, r=24, t=36, b=40),
         xaxis=dict(title="Leverage (forced every hunt pass)", fixedrange=True),
         yaxis=dict(
-            title="Last 7 days %",
+            title=f"{_HOLDOUT} %",
             range=[y0 - pad, y1 + pad],
             fixedrange=True,
             ticksuffix="%",
@@ -398,11 +525,13 @@ def _hunt_progress_fig(history: list) -> go.Figure:
     ys = [float(v) for v in step["_plot_score"].tolist()]
     n_up = sum(1 for i in range(1, len(ys)) if ys[i] > ys[i - 1] + 1e-9)
 
-    # Color markers by leverage when history has it
+    # Color markers by *deployed* leverage (not rejected candidate lev on HOLD)
     marker_colors = []
     hover_lev = []
     for _, row in step.iterrows():
-        lev = row.get("leverage")
+        lev = row.get("deployed_leverage")
+        if lev is None:
+            lev = row.get("leverage")
         try:
             li = int(lev) if lev is not None else 0
         except (TypeError, ValueError):
@@ -416,7 +545,7 @@ def _hunt_progress_fig(history: list) -> go.Figure:
         line=dict(color=GREEN, width=2.5, shape="hv"),
         marker=dict(size=9, color=marker_colors, line=dict(width=1, color="#EAECEF")),
         customdata=hover_lev,
-        hovertemplate="Attempt %{x}<br>Score %{y:.0f}/100<br>Leverage %{customdata}<extra></extra>",
+        hovertemplate="Attempt %{x}<br>Score %{y:.0f}/100<br>Deployed lev %{customdata}<extra></extra>",
     ))
     fig.add_hline(
         y=85, line_width=1, line_dash="dot", line_color=AMBER,
@@ -532,7 +661,7 @@ def _goals(grade: dict, targets: dict) -> list[dict]:
     week_ret = float(week.get("ret") if week.get("ret") is not None else (grade.get("week_return") or 0))
     week_goal = float(targets.get("week_return", targets.get("weekly_return_goal", 1.0)))
     week_final = start_eq * (1.0 + week_ret)
-    week_span = str(week.get("span") or grade.get("week_span") or "last 7 days")
+    week_span = str(week.get("span") or grade.get("week_span") or _HOLDOUT)
     week_n = int(week.get("trades") or 0)
 
     return [
@@ -774,9 +903,9 @@ def live_panel() -> None:
         )
         week_goal = float(targets.get("week_return", 1.0))
         week_final = start_eq * (1.0 + week_ret)
-        week_span = str(week.get("span") or grade.get("week_span") or "last 7 days")
+        week_span = str(week.get("span") or grade.get("week_span") or _HOLDOUT)
         week_n = int(week.get("trades") or 0)
-        # Actual paper wallet change over 7 days (if equity history exists)
+        # Actual paper wallet change over holdout window (if equity history exists)
         paper_week_ret = None
         paper_week_pnl = None
         if not eq.empty and "ts" in eq.columns and "equity" in eq.columns:
@@ -784,7 +913,7 @@ def live_panel() -> None:
             eq2["_t"] = pd.to_datetime(eq2["ts"], utc=True, errors="coerce")
             eq2 = eq2.dropna(subset=["_t"]).sort_values("_t")
             if len(eq2) >= 2:
-                cut = eq2["_t"].iloc[-1] - pd.Timedelta(days=7)
+                cut = eq2["_t"].iloc[-1] - pd.Timedelta(days=int(_HOLD_DAYS))
                 past = eq2[eq2["_t"] <= cut]
                 if not past.empty:
                     e0 = float(past["equity"].iloc[-1])
@@ -853,13 +982,13 @@ def live_panel() -> None:
             )
         elif week_ret >= 0:
             st.caption(
-                f"On historical data, this setup’s last 7 days: "
+                f"On historical data, this setup’s {_HOLDOUT}: "
                 f"${start_eq:.0f} → ${week_final:.0f} ({week_ret:+.0%}). "
                 "Still searching for something that beats that."
             )
         else:
             st.caption(
-                f"On historical data, this setup’s last 7 days are down ({week_ret:+.0%}). "
+                f"On historical data, this setup’s {_HOLDOUT} is down ({week_ret:+.0%}). "
                 "Searching for a better setup — practice money only."
             )
 
@@ -867,21 +996,21 @@ def live_panel() -> None:
         if week_met:
             level, headline, detail = (
                 "good",
-                f"Strong week on paper history ({week_ret:+.0%})",
-                f"${start_eq:.0f} → ${week_final:.0f} over the last 7 days of history. "
+                f"Strong holdout on paper history ({week_ret:+.0%})",
+                f"${start_eq:.0f} → ${week_final:.0f} over the {_HOLDOUT} history window. "
                 f"Practice wallet is separate.",
             )
         elif week_n == 0:
             level, headline, detail = (
                 "warn",
-                "Not enough recent trades to score the week yet",
+                "Not enough recent trades to score the holdout yet",
                 "Bot is still searching. Practice account will fill in as candles close.",
             )
         else:
             level, headline, detail = (
                 "bad" if week_ret < 0 else "warn",
-                f"This week’s history: {week_ret:+.0%}",
-                f"${start_eq:.0f} → ${week_final:.0f} · {week_n} trades in the last 7 days. "
+                f"Holdout history: {week_ret:+.0%}",
+                f"${start_eq:.0f} → ${week_final:.0f} · {week_n} trades in {_HOLDOUT}. "
                 f"Always hunting for a better setup.",
             )
         win_tone = "good" if win >= win_goal else "bad"
@@ -931,16 +1060,16 @@ def live_panel() -> None:
         # Four tiles — every number has a plain-English meaning
         if paper_week_ret is not None:
             paper_tile = {
-                "label": "Practice wallet · last 7 days",
+                "label": f"Practice wallet · {_HOLDOUT}",
                 "value": f"{paper_week_ret:+.0%}",
-                "hint": f"${paper_week_pnl:+.2f} actual paper P&L over the last week",
+                "hint": f"${paper_week_pnl:+.2f} actual paper P&L over {_HOLDOUT}",
                 "tone": paper_tone,
             }
         else:
             paper_tile = {
-                "label": "Practice wallet · last 7 days",
+                "label": f"Practice wallet · {_HOLDOUT}",
                 "value": "—",
-                "hint": "Needs a full week of wallet history before this % can show",
+                "hint": f"Needs a full {_HOLD_DAYS}d of wallet history before this % can show",
                 "tone": "",
             }
 
@@ -963,21 +1092,64 @@ def live_panel() -> None:
                 f"{bal_pnl:+.2f} vs ${start_eq:.0f} start"
             )
 
-        hero_panel(
-            level,
-            headline,
-            detail,
-            [
-                {
-                    "label": "Last 7 days on this setup (history)",
-                    "value": f"${week_final:,.0f}",
+        champ_tile = None
+        champ_knobs = _peak_champion_knobs(state)
+        if champ_knobs:
+            try:
+                end_ts = _week_end_from_span(week_span)
+                champ_snap = _champion_same_week(
+                    json.dumps(champ_knobs, sort_keys=True, default=str),
+                    end_ts.isoformat(),
+                    float(start_eq),
+                )
+            except Exception as e:
+                champ_snap = None
+                st.caption(f"Champion same-week score unavailable: {e}")
+            if champ_snap is not None:
+                c_ret = float(champ_snap["week_ret"])
+                c_final = start_eq * (1.0 + c_ret)
+                c_kn = champ_snap.get("knobs") or champ_knobs
+                c_lev = int(c_kn.get("leverage") or 0)
+                c_tf = str(c_kn.get("timeframe") or "")
+                c_strat = str(c_kn.get("strategy") or "")
+                c_n = int(champ_snap.get("trades") or 0)
+                c_span = str(champ_snap.get("span") or week_span or "")
+                c_book = (
+                    f"{c_strat} {c_lev}×@{c_tf}".strip()
+                    if (c_strat or c_lev or c_tf)
+                    else "champion book"
+                )
+                champ_tile = {
+                    "label": f"Champion · same {_HOLDOUT}",
+                    "value": f"${c_final:,.0f}",
                     "hint": (
-                        f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
-                        f"simulated from past candles · goal ≥ {week_goal:.0%} · "
-                        f"{week_n} trades in that week"
+                        f"{c_book} · ${start_eq:,.0f} → ${c_final:,.0f} ({c_ret:+.0%}) "
+                        f"same window as live"
+                        + (f" ({c_span})" if c_span else "")
+                        + (f" · {c_n} trades" if c_n else "")
                     ),
-                    "tone": week_tone,
-                },
+                    "tone": (
+                        "good" if c_ret >= week_goal
+                        else ("accent" if c_ret > 0 else "bad")
+                    ),
+                }
+
+        hero_stats = [
+            {
+                "label": f"Live setup · {_HOLDOUT}",
+                "value": f"${week_final:,.0f}",
+                "hint": (
+                    f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
+                    f"simulated from past candles · goal ≥ {week_goal:.0%} · "
+                    f"{week_n} trades in that holdout"
+                ),
+                "tone": week_tone,
+            },
+        ]
+        if champ_tile is not None:
+            hero_stats.append(champ_tile)
+        hero_stats.extend(
+            [
                 paper_tile,
                 {
                     "label": "Quality score",
@@ -991,8 +1163,9 @@ def live_panel() -> None:
                     "hint": bal_hint,
                     "tone": bal_tone,
                 },
-            ],
+            ]
         )
+        hero_panel(level, headline, detail, hero_stats)
 
         # Only mention candle progress when the wallet is still quiet
         if n_closed == 0 and bars_seen > 0:
@@ -1048,8 +1221,9 @@ def live_panel() -> None:
         _plot(hunt_fig)
 
         section_header(
-            "7-day history return by search",
-            "Each point = how the then-current setup did on the last 7 days of history · marker color = leverage · goal line at +100%",
+            f"{_HOLDOUT} history return by search",
+            f"Each point = how the then-current setup did on the {_HOLDOUT} history window · "
+            "marker color = deployed leverage · goal line at +100%",
         )
         _plot(_week_return_fig(history))
 
@@ -1077,8 +1251,8 @@ def live_panel() -> None:
                     pass
         section_header(
             "Leverage bake-off (this hunt pass)",
-            "Every search forces 5× / 10× / 15× / 25× on the same book — bars = last-7-day history return · "
-            "green=5× · gold=7× · blue=10× · purple=15× · red=25×",
+            f"Fixed lev×TF matrix on the current book — bars = {_HOLDOUT} history return · "
+            "green=5× · gold=7× · blue=10× · purple=15× · red=25× · sparse high-lev skipped for promote",
         )
         _plot(_leverage_ladder_fig(ladder, current_lev=cur_lev))
         if ladder:
@@ -1086,8 +1260,8 @@ def live_panel() -> None:
                 "Leverage": f"{int(r.get('leverage') or 0)}×",
                 "Candle size": r.get("timeframe") or "—",
                 "Style": r.get("strategy") or "—",
-                "7-day history": f"{float(r.get('week_ret') or 0):+.0%}",
-                "Week trades": int(r.get("week_trades") or 0),
+                f"{_HOLDOUT} history": f"{float(r.get('week_ret') or 0):+.0%}",
+                "Holdout trades": int(r.get("week_trades") or 0),
                 "Score": int(r.get("score") or 0),
                 "Win rate": f"{float(r.get('win') or 0):.0%}",
                 "On live bot": (
@@ -1194,7 +1368,7 @@ def live_panel() -> None:
                     "Candle": h.get("timeframe") or "—",
                     "Score": sc if sc is not None else "—",
                     "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                    "7-day history": week_note,
+                    f"{_HOLDOUT} history": week_note,
                     "Trades in test": h.get("test_n"),
                     "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
                 })
