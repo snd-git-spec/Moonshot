@@ -168,17 +168,29 @@ def build_features(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     f["h4_adx"] = h4_prev["h4_adx"]
     f["h4_bias"] = h4_prev["h4_bias"].fillna(0.0)
 
-    # Completed weekly bias (no lookahead): close vs weekly EMA on closed weeks only
+    # Completed weekly bias (no lookahead): close vs weekly EMA on closed weeks only.
+    # weekly_stale mirrors equity_stale: True when EMA missing or last completed
+    # week is older than ~8 days (gap / window boundary without a fresh close).
     weekly = resample_ohlcv(f, "1W")
     w_period = max(2, int(getattr(cfg, "ema_weekly_period", 10) or 10))
     weekly["ema_w"] = ema(weekly["close"], w_period)
-    w_prev = weekly[["close", "ema_w"]].shift(1).rename(columns={"close": "w_close"})
+    weekly["week_end"] = weekly.index
+    w_prev = (
+        weekly[["close", "ema_w", "week_end"]]
+        .shift(1)
+        .rename(columns={"close": "w_close", "week_end": "w_week_end"})
+    )
     w_prev = w_prev.reindex(f.index, method="ffill")
     f["w_close"] = w_prev["w_close"]
     f["w_ema"] = w_prev["ema_w"]
+    f["w_week_end"] = w_prev["w_week_end"]
     w_up = (f["w_close"] > f["w_ema"]).fillna(False)
     w_dn = (f["w_close"] < f["w_ema"]).fillna(False)
     f["weekly_bias"] = np.where(w_up, 1.0, np.where(w_dn, -1.0, 0.0))
+    age = f.index.to_series().subtract(pd.to_datetime(f["w_week_end"], utc=True), fill_value=pd.NaT)
+    # pandas Timedelta Series — stale if NaT / NaN ema or age > 8 days
+    stale_age = age > pd.Timedelta(days=8)
+    f["weekly_stale"] = f["w_ema"].isna() | f["w_week_end"].isna() | stale_age.fillna(True)
 
     valid = f[["ema_htf", "atr", "adx", "d_ema"]].notna().all(axis=1).to_numpy()
     adx_on = hysteresis(f["adx"].to_numpy(), cfg.adx_enter, cfg.adx_exit)

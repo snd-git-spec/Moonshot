@@ -167,6 +167,14 @@ class Momentum15Strategy:
                 if want_short and d_close >= d_ema:
                     return None
         if self.cfg.require_weekly_bias:
+            if bool(getattr(bar, "weekly_stale", False)):
+                if not getattr(self, "_weekly_stale_warned", False):
+                    log.warning(
+                        "weekly_bias stale — gating %s entries until a fresh completed week",
+                        symbol,
+                    )
+                    self._weekly_stale_warned = True
+                return None
             wb = float(getattr(bar, "weekly_bias", 0.0) or 0.0)
             if want_long and wb <= 0:
                 return None
