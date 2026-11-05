@@ -834,6 +834,10 @@ class LiveRunner:
         if not dec.approved:
             log.info("%s queued signal rejected at open: %s", sym, dec.reason)
             with contextlib.suppress(Exception):
+                self.db.log_rejected_entry(
+                    ts, sym, sig.direction.value, float(price), float(stop), str(dec.reason)
+                )
+            with contextlib.suppress(Exception):
                 _live_feed(
                     "reject",
                     f"{sym.split('/')[0]} blocked at open: {dec.reason}",

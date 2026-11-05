@@ -47,6 +47,9 @@ class Persistence:
                 pause_until TEXT);
             CREATE TABLE IF NOT EXISTS events (
                 ts TEXT, mode TEXT, symbol TEXT, kind TEXT, payload TEXT);
+            CREATE TABLE IF NOT EXISTS rejected_entries (
+                ts TEXT, mode TEXT, symbol TEXT, direction TEXT,
+                entry REAL, stop REAL, reason TEXT);
             """
         )
         self._migrate()
@@ -72,6 +75,38 @@ class Persistence:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_config_hash ON trades(config_hash)"
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_entries (
+                ts TEXT, mode TEXT, symbol TEXT, direction TEXT,
+                entry REAL, stop REAL, reason TEXT)
+            """
+        )
+
+    def log_rejected_entry(
+        self,
+        ts: datetime,
+        symbol: str,
+        direction: str,
+        entry: float,
+        stop: float,
+        reason: str,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO rejected_entries
+               (ts, mode, symbol, direction, entry, stop, reason)
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                pd.Timestamp(ts).isoformat(),
+                self.mode,
+                symbol,
+                direction,
+                float(entry),
+                float(stop),
+                reason,
+            ),
+        )
+        self.conn.commit()
 
     def log_trade(self, t: TradeResult) -> None:
         self.conn.execute(
