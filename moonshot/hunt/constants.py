@@ -141,7 +141,8 @@ HUNT_SOFT_BUDGET = {"polish": 10, "explore": 14, "breakout": 16}
 HUNT_STUCK_HELD = 6
 HUNT_CHAMPION_STALE_PP = 0.08  # stored peak − live reeval ≥ 8pp → floor uses live
 HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
-HUNT_TF_ALLOW = ("5m", "15m")
+# A.4 — research allow-list includes 1h/4h; keep 5m/15m for continuity.
+HUNT_TF_ALLOW = ("5m", "15m", "1h", "4h")
 HUNT_LEV_POLISH = (5, 7, 10)
 HUNT_LEV_BREAKOUT = (5, 7, 10, 15, 25)
 HUNT_LEV_FORCE = (5, 10, 15, 25)
