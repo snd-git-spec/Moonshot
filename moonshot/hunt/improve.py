@@ -31,6 +31,7 @@ from moonshot.hunt.constants import (
     HUNT_CHAMP_TRAIL_PASSES,
     HUNT_CHAMP_TRAIL_PP,
     HUNT_SILENCE_MAX_PEAK_GAP_PP,
+    HUNT_SILENCE_ROTATE_ENABLED,
     HUNT_CURRICULUM_SYMBOLS,
     HUNT_HALVING_A_DAYS,
     HUNT_HALVING_A_KEEP,
@@ -978,17 +979,13 @@ def improve_once(
             trail_ready = int(state.get("champ_trail_streak") or 0) >= int(
                 HUNT_CHAMP_TRAIL_PASSES
             )
-            # Idle under peak also arms rescue (before silence can swap families).
-            idle_under_peak = (
-                idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
-                and _cfg_fingerprint(ch_cfg) != _cfg_fingerprint(base)
-            )
+            # A.2: rescue = restore peak only (pending drift / trail), never idle swap.
             dual_ok = _dual_week_ok(ch_week) or champ_week_live >= hard_floor
             ch_wf = _wf_for(ch_cfg) if wf_enabled else {"ok": True}
             wf_ok_rescue = (not wf_enabled) or bool(ch_wf and ch_wf.get("ok"))
             if (
                 best_cfg is base
-                and (pending_drift or trail_ready or idle_under_peak)
+                and (pending_drift or trail_ready)
                 and dual_ok
                 and wf_ok_rescue
                 and champ_week_live >= hard_floor
@@ -1010,31 +1007,30 @@ def improve_once(
                 state["pending_champion_rescue"] = False
                 state["champ_trail_streak"] = 0
                 log.info(
-                    "CHAMPION RESCUE · trail=%+.0fpp · pending_drift=%s idle_under_peak=%s · "
+                    "CHAMPION RESCUE · trail=%+.0fpp · pending_drift=%s · "
                     "deploying champ week=%+.0f%% (live %+0.f%%)",
                     trail_pp * 100,
                     pending_drift,
-                    idle_under_peak,
                     champ_week_live * 100,
                     live_week_now * 100,
                 )
             else:
                 log.info(
                     "champion trail · live_week=%+.0f%% champ=%+.0f%% trail=%+.0fpp "
-                    "streak=%d pending_drift=%s idle_under_peak=%s",
+                    "streak=%d pending_drift=%s",
                     live_week_now * 100,
                     champ_week_live * 100,
                     trail_pp * 100,
                     int(state.get("champ_trail_streak") or 0),
                     pending_drift,
-                    idle_under_peak,
                 )
         except Exception as e:
             log.warning("champion rescue eval failed: %s", e)
 
-    # ---- Silence rotate: paper idle → Live only (never clobbers champion_peak) ----
+    # ---- Silence rotate: disabled (A.2) — idle no longer swaps families ----
     if (
-        (not champion_rescue)
+        bool(HUNT_SILENCE_ROTATE_ENABLED)
+        and (not champion_rescue)
         and best_cfg is base
         and idle_h >= float(PAPER_SILENCE_ROTATE_HOURS)
         and held >= 3

@@ -157,6 +157,8 @@ HUNT_CHAMP_TRAIL_PP = 0.30  # champ − live week ≥ 30pp
 HUNT_CHAMP_TRAIL_PASSES = 2  # consecutive passes before rescue
 # Silence rotate may not deploy a book worse than peak same-window reeval by more than this.
 HUNT_SILENCE_MAX_PEAK_GAP_PP = 0.20
+# A.2 — disable silence family-swap; drift uses halt + optional peak restore only.
+HUNT_SILENCE_ROTATE_ENABLED = False
 # High-lev density floors (holdout week trades)
 HUNT_LEV15_MIN_WEEK_TRADES = 12
 HUNT_LEV25_MIN_WEEK_TRADES = 20
