@@ -38,7 +38,7 @@ LIVE_FEED_PATH = Path(__file__).resolve().parent / ".moonshot_live.jsonl"
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Syne:wght@600;700;800&display=swap');
 
 /* ---- exchange-terminal shell ---- */
 html, body, [class*="css"], .stApp, .stMarkdown, .stText, label {
@@ -271,10 +271,25 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
   margin: 0.15rem 0 0.75rem 0;
 }
 .ms-home-brand {
-  font-size: clamp(2.2rem, 5vw, 3.2rem); font-weight: 700; letter-spacing: -0.04em;
-  color: #EAECEF; line-height: 1; margin: 0.15rem 0 0.5rem 0;
+  font-family: 'Syne', 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: clamp(2.6rem, 6vw, 3.8rem);
+  font-weight: 800;
+  letter-spacing: -0.06em;
+  color: #EAECEF;
+  line-height: 0.95;
+  margin: 0.2rem 0 0.55rem 0;
+  display: inline-block;
+  position: relative;
 }
-.ms-home-brand span { color: #F0B90B; }
+.ms-home-brand::after {
+  content: "";
+  display: block;
+  width: 1.15em;
+  height: 3px;
+  margin-top: 0.28rem;
+  border-radius: 2px;
+  background: #F0B90B;
+}
 .ms-home-lead { color: #848E9C; font-size: 1.05rem; max-width: 34rem; line-height: 1.45; margin-bottom: 1rem; }
 .ms-step {
   border: 1px solid #1E2329; border-radius: 6px; padding: 0.9rem 1rem;

@@ -1,4 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="160" height="36" viewBox="0 0 160 36" fill="none">
-  <text x="0" y="26" font-family="IBM Plex Sans, system-ui, sans-serif" font-size="22" font-weight="700" letter-spacing="-0.6" fill="#EAECEF">Moon</text>
-  <text x="68" y="26" font-family="IBM Plex Sans, system-ui, sans-serif" font-size="22" font-weight="700" letter-spacing="-0.6" fill="#F0B90B">shot</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="152" height="36" viewBox="0 0 152 36" fill="none">
+  <!-- Mark -->
+  <path d="M8 6 L14 18 L8 30 L2 18 Z" fill="#F0B90B"/>
+  <!-- One-word wordmark -->
+  <text
+    x="22"
+    y="24"
+    font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+    font-size="20"
+    font-weight="700"
+    letter-spacing="-1.2"
+    fill="#EAECEF"
+  >Moonshot</text>
 </svg>

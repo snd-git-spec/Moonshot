@@ -22,7 +22,7 @@ topbar(balance=bal, score=score, mode="PAPER", active="About")
 
 st.markdown(
     '<div class="ms-page-kicker">About</div>'
-    '<div class="ms-home-brand">Moon<span>shot</span></div>'
+    '<div class="ms-home-brand">Moonshot</div>'
     '<p class="ms-home-lead">'
     "Practice-only futures bot. It hunts better settings on paper until the numbers hold up. "
     "Real money stays off until you flip it yourself."
