@@ -20,27 +20,39 @@ st.set_page_config(
 )
 
 
+def _normalize_password(raw: str | None) -> str:
+    """Strip whitespace/quotes and drop zero-width chars that break paste matches."""
+    s = (raw or "").strip().strip("\ufeff").strip('"').strip("'")
+    for ch in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        s = s.replace(ch, "")
+    return s
+
+
 def _require_dashboard_password() -> bool:
     """Gate cloud UI when DASHBOARD_PASSWORD is set (local unset = open)."""
-    expected = (os.getenv("DASHBOARD_PASSWORD") or "").strip().strip('"').strip("'")
+    expected = _normalize_password(os.getenv("DASHBOARD_PASSWORD"))
     if not expected:
         return True
     if st.session_state.get("dashboard_authed"):
         return True
     st.markdown("### Moonshot")
     st.caption("Private dashboard — enter password to continue.")
-    with st.form("dashboard_login", clear_on_submit=False):
-        pw = st.text_input("Password", type="password", autocomplete="current-password")
-        ok = st.form_submit_button("Unlock", type="primary")
+    # Avoid st.form — Streamlit password fields inside forms can submit empty on some browsers.
+    pw = st.text_input("Password", type="password", autocomplete="current-password")
+    ok = st.button("Unlock", type="primary")
     if ok:
-        got = (pw or "").strip()
-        # compare_digest requires equal length; unequal → wrong password (no throw)
-        if len(got) == len(expected) and hmac.compare_digest(
+        got = _normalize_password(pw)
+        match = len(got) == len(expected) and hmac.compare_digest(
             got.encode("utf-8"), expected.encode("utf-8")
-        ):
+        )
+        if match:
             st.session_state["dashboard_authed"] = True
             st.rerun()
-        st.error("Wrong password. If you just changed it in Render, wait for deploy to finish.")
+        # Length hint only — never echo the password.
+        st.error(
+            f"Wrong password (typed {len(got)} chars, expected {len(expected)}). "
+            "Re-copy from Render → Environment → Show secret after the latest deploy is live."
+        )
     return False
 
 
