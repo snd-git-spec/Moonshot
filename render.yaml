@@ -1,0 +1,26 @@
+# One always-on Web Service: Streamlit UI + autopilot/paper (~$7).
+# Dashboard URL is public; attach the disk so hunt state survives deploys.
+services:
+  - type: web
+    name: moonshot
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt && pip install -e .
+    startCommand: bash scripts/render_start.sh
+    healthCheckPath: /
+    disk:
+      name: moonshot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.9"
+      - key: RENDER_DISK_PATH
+        value: /var/data
+      - key: LIVE_TRADING_ENABLED
+        value: "0"
+      - key: AUTOPILOT_COOLDOWN_SECONDS
+        value: "60"
+      # Paste the rest from local .env in the Render dashboard (Add from .env).
