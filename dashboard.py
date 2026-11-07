@@ -22,7 +22,7 @@ st.set_page_config(
 
 def _require_dashboard_password() -> bool:
     """Gate cloud UI when DASHBOARD_PASSWORD is set (local unset = open)."""
-    expected = (os.getenv("DASHBOARD_PASSWORD") or "").strip()
+    expected = (os.getenv("DASHBOARD_PASSWORD") or "").strip().strip('"').strip("'")
     if not expected:
         return True
     if st.session_state.get("dashboard_authed"):
@@ -33,10 +33,14 @@ def _require_dashboard_password() -> bool:
         pw = st.text_input("Password", type="password", autocomplete="current-password")
         ok = st.form_submit_button("Unlock", type="primary")
     if ok:
-        if hmac.compare_digest(pw.encode("utf-8"), expected.encode("utf-8")):
+        got = (pw or "").strip()
+        # compare_digest requires equal length; unequal → wrong password (no throw)
+        if len(got) == len(expected) and hmac.compare_digest(
+            got.encode("utf-8"), expected.encode("utf-8")
+        ):
             st.session_state["dashboard_authed"] = True
             st.rerun()
-        st.error("Wrong password.")
+        st.error("Wrong password. If you just changed it in Render, wait for deploy to finish.")
     return False
 
 
