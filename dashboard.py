@@ -6,6 +6,8 @@ Moonshot — practice trading console.
 
 from __future__ import annotations
 
+import hmac
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -16,6 +18,30 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+def _require_dashboard_password() -> bool:
+    """Gate cloud UI when DASHBOARD_PASSWORD is set (local unset = open)."""
+    expected = (os.getenv("DASHBOARD_PASSWORD") or "").strip()
+    if not expected:
+        return True
+    if st.session_state.get("dashboard_authed"):
+        return True
+    st.markdown("### Moonshot")
+    st.caption("Private dashboard — enter password to continue.")
+    with st.form("dashboard_login", clear_on_submit=False):
+        pw = st.text_input("Password", type="password", autocomplete="current-password")
+        ok = st.form_submit_button("Unlock", type="primary")
+    if ok:
+        if hmac.compare_digest(pw.encode("utf-8"), expected.encode("utf-8")):
+            st.session_state["dashboard_authed"] = True
+            st.rerun()
+        st.error("Wrong password.")
+    return False
+
+
+if not _require_dashboard_password():
+    st.stop()
 
 from dash_lib import inject_theme  # noqa: E402
 
