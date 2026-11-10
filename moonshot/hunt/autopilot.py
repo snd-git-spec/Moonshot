@@ -77,11 +77,13 @@ def _run_scoreboard_watchdog() -> dict:
 
     live_dep = st.get("live_deployed") or {}
     try:
-        live_week = float(live_dep.get("week_ret")) if live_dep.get("week_ret") is not None else None
+        live_week = (
+            float(live_dep.get("week_ret")) if live_dep.get("week_ret") is not None else None
+        )
     except (TypeError, ValueError):
         live_week = None
     if live_week is None:
-        last = (st.get("last_improve") or {})
+        last = st.get("last_improve") or {}
         try:
             live_week = (
                 float(last.get("best", {}).get("week_return"))
@@ -240,9 +242,7 @@ class PaperSupervisor:
             if not fp[0]:
                 return
             book_changed = fp != prev_fp
-            stale_halt = bool(st.get("paper_bleed_halt")) and not st.get(
-                "paper_bleed_window_start"
-            )
+            stale_halt = bool(st.get("paper_bleed_halt")) and not st.get("paper_bleed_window_start")
             if book_changed or stale_halt:
                 _clear_paper_bleed_circuit(st, ts=_utc_now().isoformat())
                 _save_autopilot_state(st)
@@ -391,15 +391,11 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
                 met = bool((decision.get("grade") or {}).get("targets_met"))
                 if decision.get("improved"):
                     if autopilot_frozen():
-                        log.info(
-                            "AUTOPILOT_FROZEN=1: promotion suppressed — paper not restarted"
-                        )
+                        log.info("AUTOPILOT_FROZEN=1: promotion suppressed — paper not restarted")
                     else:
                         just_promoted = True
                         restart_paper.set()
-                        _live_feed(
-                            "paper_restart", "Restarting practice bot with new settings…"
-                        )
+                        _live_feed("paper_restart", "Restarting practice bot with new settings…")
             except Exception as e:
                 log.error("improve pass failed: %s", e)
                 _live_feed("error", f"Improve pass failed: {e}")
@@ -453,7 +449,7 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
                 supervisor.start()
                 # Post-restart: assert child inherited the expected S/T/L.
                 deadline = time.time() + float(PAPER_BOOK_ASSERT_SEC)
-                exp = (_load_autopilot_state().get("expected_paper_book") or {})
+                exp = _load_autopilot_state().get("expected_paper_book") or {}
                 want = (
                     str(exp.get("strategy") or os.environ.get("STRATEGY") or ""),
                     str(exp.get("timeframe") or os.environ.get("TIMEFRAME") or ""),

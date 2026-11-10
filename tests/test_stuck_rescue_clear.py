@@ -34,9 +34,7 @@ def test_watchdog_clears_stuck_pending_when_env_matches_champ(tmp_path, monkeypa
     saved = {}
 
     monkeypatch.setattr(ap, "_load_autopilot_state", lambda: state)
-    monkeypatch.setattr(
-        ap, "_env_book_fingerprint", lambda: ("momentum_15", "5m", "10")
-    )
+    monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("momentum_15", "5m", "10"))
     monkeypatch.setattr(ap, "_save_autopilot_state", lambda st: saved.update(st))
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
 

@@ -73,8 +73,6 @@ def test_initial_risk_dollars_populated(tmp_path: Path):
         config_json="{}",
     )
     p.log_trade(tr)
-    row = p.conn.execute(
-        "SELECT initial_risk_dollars, config_hash FROM trades"
-    ).fetchone()
+    row = p.conn.execute("SELECT initial_risk_dollars, config_hash FROM trades").fetchone()
     assert float(row[0]) == 5.0
     assert row[1] == "abc"

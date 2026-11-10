@@ -453,11 +453,7 @@ def improve_once(
             return False
         # Period-robust: never let a red prior/OOS/soft book become in-memory best.
         if HUNT_TARGETS.get("require_period_robust", True):
-            _soft_v = (
-                float(cs_.total_return)
-                if cs_ is not None
-                else float(co_.total_return)
-            )
+            _soft_v = float(cs_.total_return) if cs_ is not None else float(co_.total_return)
             _rok, _rwhy = _period_robust_ok(cweek, float(co_.total_return), _soft_v)
             if not _rok:
                 return False
@@ -684,9 +680,7 @@ def improve_once(
         for _tf_warm in matrix_tfs:
             _raw_for_tf(str(_tf_warm))
         _matrix_cfgs = [
-            c
-            for c in _tf_lev_matrix_cfgs(base)
-            if str(c.timeframe) in {str(t) for t in matrix_tfs}
+            c for c in _tf_lev_matrix_cfgs(base) if str(c.timeframe) in {str(t) for t in matrix_tfs}
         ]
         matrix_cells = [_freeze_risk_matrix(base, c) for c in _matrix_cfgs]
         hard_rows: list[dict] = []
@@ -715,6 +709,7 @@ def improve_once(
                     hard_rows.append(row)
                     continue
                 data = _prepare_cached(use_raw, cand, feat_cache)
+
                 # Same calendar end as Live scorecard (like-for-like). Skip only if
                 # this TF's data does not cover the holdout start.
                 # Compare coverage in naive UTC; evaluate week with end=t1 so tz
@@ -725,9 +720,7 @@ def improve_once(
                         out = out.tz_convert("UTC").tz_localize(None)
                     return out
 
-                last_bar_n = _as_naive_utc(
-                    max(sd.bars[-1].Index for sd in data.values())
-                )
+                last_bar_n = _as_naive_utc(max(sd.bars[-1].Index for sd in data.values()))
                 ho_start_n = _as_naive_utc(t1) - pd.Timedelta(days=int(WEEK_DAYS))
                 if last_bar_n < ho_start_n:
                     row["skip"] = True
@@ -741,9 +734,7 @@ def improve_once(
                 try:
                     if "→" in span_s:
                         a, b = [x.strip() for x in span_s.split("→", 1)]
-                        span_days = (
-                            pd.Timestamp(b) - pd.Timestamp(a)
-                        ).total_seconds() / 86400.0
+                        span_days = (pd.Timestamp(b) - pd.Timestamp(a)).total_seconds() / 86400.0
                 except Exception:
                     span_days = float(WEEK_DAYS)
                 # Preserve legitimate 0.0 returns (do not coalesce with `or 0` after None-check)
@@ -804,9 +795,7 @@ def improve_once(
                 rok, rwhy = _period_robust_ok(cweek, float(co.total_return), soft_ret)
                 row["robust_ok"] = bool(rok)
                 row["why"] = rwhy if not rok else "period_robust"
-                if rok and _is_screenable(ci, co) and _is_climb_ok(
-                    ci, co, cs, base_i, base_o
-                ):
+                if rok and _is_screenable(ci, co) and _is_climb_ok(ci, co, cs, base_i, base_o):
                     _consider(cand, ci, co, cs, "tf_lev_matrix")
                 # best_by_tf memory (robust only)
                 if rok:
@@ -961,9 +950,7 @@ def improve_once(
                 volume_multiplier=1.1,
                 mom_lookback=8,
                 mom_min_atr=0.35,
-                max_account_leverage=float(
-                    max(lev, float(polish_base.max_account_leverage))
-                ),
+                max_account_leverage=float(max(lev, float(polish_base.max_account_leverage))),
                 max_net_leverage=float(max(lev, float(polish_base.max_net_leverage))),
             )
             for st in HUNT_STRATEGIES
@@ -1154,11 +1141,7 @@ def improve_once(
         primary_ret = float(cweek_r.get("ret") or 0)
         week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
         hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
-        if (
-            not _dual_week_ok(cweek_r)
-            and primary_ret < week_tgt
-            and primary_ret < hard_floor
-        ):
+        if not _dual_week_ok(cweek_r) and primary_ret < week_tgt and primary_ret < hard_floor:
             confirm_rejects["dual"] += 1
             continue
         if not _is_climb_ok(ci, co, cs, base_i, base_o):
@@ -1213,8 +1196,7 @@ def improve_once(
         log.info(
             "leverage ladder (matrix alias): %s",
             " · ".join(
-                f"{r['leverage']}x@{r['timeframe']} week={r['week_ret']:+.0%} "
-                f"n={r['week_trades']}"
+                f"{r['leverage']}x@{r['timeframe']} week={r['week_ret']:+.0%} n={r['week_trades']}"
                 for r in leverage_ladder
             ),
         )
@@ -1254,9 +1236,7 @@ def improve_once(
             else:
                 state["champ_trail_streak"] = 0
             pending_drift = bool(state.get("pending_champion_rescue"))
-            trail_ready = int(state.get("champ_trail_streak") or 0) >= int(
-                HUNT_CHAMP_TRAIL_PASSES
-            )
+            trail_ready = int(state.get("champ_trail_streak") or 0) >= int(HUNT_CHAMP_TRAIL_PASSES)
             # A.2: rescue = restore peak only (pending drift / trail), never idle swap.
             # When Live is deep red / far behind champ, accept champ ≥15% (not only
             # hard_floor 25%) — 24% champ vs 1% Live was rejected forever on a 1pp miss.
@@ -1362,9 +1342,7 @@ def improve_once(
             # Lev-up matrix escape needs +5pp; same/lower lev TF escape +2pp.
             lev_up = int(esc.leverage) > int(base.leverage)
             need_pp = (
-                float(RESEARCH_LEV_UP_WEEK_PP)
-                if lev_up
-                else float(RESEARCH_HYSTERESIS_WEEK_PP)
+                float(RESEARCH_LEV_UP_WEEK_PP) if lev_up else float(RESEARCH_HYSTERESIS_WEEK_PP)
             )
             clear_margin = esc_week >= base_w + need_pp
             champ_gap_ok = (
@@ -1571,8 +1549,7 @@ def improve_once(
         and (
             int(best_week.get("trades") or 0) >= 2
             or int(best_week.get("soft_trades") or 0) >= 2
-            or float(best_week.get("ret") or 0)
-            > float(base_week.get("ret") or 0) + 0.02
+            or float(best_week.get("ret") or 0) > float(base_week.get("ret") or 0) + 0.02
         )
     ):
         best_week_active = True
@@ -1699,10 +1676,7 @@ def improve_once(
     dual_or_goal = (
         _dual_week_ok(best_week)
         or best_week_ret_now >= float(HUNT_TARGETS.get("week_return", 1.0))
-        or (
-            stuck_soften
-            and best_week_ret_now + 0.001 >= float(base_week.get("ret") or 0)
-        )
+        or (stuck_soften and best_week_ret_now + 0.001 >= float(base_week.get("ret") or 0))
         or (
             _prior_nonneg
             and best_week_ret_now
@@ -1733,13 +1707,9 @@ def improve_once(
     # deployed book (must beat base soft + OOS) so Live can leave a death book.
     if research_improved and HUNT_TARGETS.get("require_period_robust", True):
         _soft_r = (
-            float(best_soft.total_return)
-            if best_soft is not None
-            else float(best_o.total_return)
+            float(best_soft.total_return) if best_soft is not None else float(best_o.total_return)
         )
-        robust_ok, robust_why = _period_robust_ok(
-            best_week, float(best_o.total_return), _soft_r
-        )
+        robust_ok, robust_why = _period_robust_ok(best_week, float(best_o.total_return), _soft_r)
         if not robust_ok:
             base_soft_r = (
                 float(base_soft.total_return)
@@ -1747,22 +1717,14 @@ def improve_once(
                 else float(base_o.total_return)
             )
             stuck_soften = held >= int(HUNT_STUCK_SOFTEN_HELD)
-            week_led_escape = (
-                (silence_rotate or champion_rescue or paper_bleeding)
-                and float(best_week.get("ret") or 0)
-                >= float(base_week.get("ret") or 0) + 0.02
-            )
+            week_led_escape = (silence_rotate or champion_rescue or paper_bleeding) and float(
+                best_week.get("ret") or 0
+            ) >= float(base_week.get("ret") or 0) + 0.02
             relative_escape = (
-                (
-                    silence_rotate
-                    or paper_bleeding
-                    or stuck_soften
-                    or champion_rescue
-                )
+                (silence_rotate or paper_bleeding or stuck_soften or champion_rescue)
                 and float(best_o.total_return) > float(base_o.total_return) + 0.02
                 and _soft_r > base_soft_r + 0.02
-                and float(best_week.get("ret") or 0)
-                >= float(base_week.get("ret") or 0) - 0.05
+                and float(best_week.get("ret") or 0) >= float(base_week.get("ret") or 0) - 0.05
             )
             if week_led_escape or relative_escape:
                 log.warning(
@@ -2007,9 +1969,7 @@ def improve_once(
                 or held >= int(HUNT_STUCK_SOFTEN_HELD)
             )
             if escape_xfer:
-                log.warning(
-                    "transfer check failed during escape (%s) — still promoting", e
-                )
+                log.warning("transfer check failed during escape (%s) — still promoting", e)
                 transfer_gap = {
                     "research_source": str(hunt_src),
                     "research_ret": spot_ret,
@@ -2083,10 +2043,7 @@ def improve_once(
         state["challenger_streak"] = streak
         if streak < int(RESEARCH_HYSTERESIS_PASSES):
             research_improved = False
-            material_why = (
-                f"hysteresis streak {streak}/{int(RESEARCH_HYSTERESIS_PASSES)} "
-                f"fp={fp}"
-            )
+            material_why = f"hysteresis streak {streak}/{int(RESEARCH_HYSTERESIS_PASSES)} fp={fp}"
             log.info("hysteresis blocked promote: %s", material_why)
         elif best_week_ret_now < base_week_ret + float(RESEARCH_HYSTERESIS_WEEK_PP):
             research_improved = False
@@ -2132,9 +2089,7 @@ def improve_once(
             s_ret = float(s_week.get("ret") or 0)
             if s_ret < base_week_ret:
                 research_improved = False
-                material_why = (
-                    f"2x cost week {s_ret:+.0%} < Live {base_week_ret:+.0%}"
-                )
+                material_why = f"2x cost week {s_ret:+.0%} < Live {base_week_ret:+.0%}"
                 log.info("2x-cost blocked promote: %s", material_why)
             else:
                 log.info(
@@ -2464,13 +2419,9 @@ def improve_once(
     }
     if improved and not silence_rotate:
         _soft_r = (
-            float(best_soft.total_return)
-            if best_soft is not None
-            else float(best_o.total_return)
+            float(best_soft.total_return) if best_soft is not None else float(best_o.total_return)
         )
-        _raise_ok, _raise_why = _period_robust_ok(
-            best_week, float(best_o.total_return), _soft_r
-        )
+        _raise_ok, _raise_why = _period_robust_ok(best_week, float(best_o.total_return), _soft_r)
         if _raise_ok:
             champion = _raise_champion_peak(
                 state,

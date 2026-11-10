@@ -74,9 +74,9 @@ def cost_share_dollars(
 ) -> float:
     """Dollar cost_share = costs / gross_dollar_pnl (never mix into R)."""
     costs = float(sum(fees) + sum(funding))
-    gross = float(
-        sum(r * risk for r, risk in zip(r_multiples, initial_risks, strict=False))
-    ) + costs
+    gross = (
+        float(sum(r * risk for r, risk in zip(r_multiples, initial_risks, strict=False))) + costs
+    )
     if abs(gross) < 1e-12:
         return float("nan")
     return costs / gross

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 from moonshot.hunt.constants import autopilot_frozen
 
 

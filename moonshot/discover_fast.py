@@ -28,7 +28,9 @@ def data_hash_from_frame(df: pd.DataFrame) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def config_hash_fee_slip(fee_taker: float, slip: float, *, hold: int, stop_atr: float = STOP_ATR) -> str:
+def config_hash_fee_slip(
+    fee_taker: float, slip: float, *, hold: int, stop_atr: float = STOP_ATR
+) -> str:
     payload = {
         "fee_taker": fee_taker,
         "slip": slip,
@@ -59,9 +61,7 @@ def barrier_outcomes_vectorized(
         # Local ATR(14) without importing moonshot.atr (keeps unit tests light)
         prev_c = np.roll(c, 1)
         prev_c[0] = c[0]
-        tr = np.maximum(
-            h - low, np.maximum(np.abs(h - prev_c), np.abs(low - prev_c))
-        )
+        tr = np.maximum(h - low, np.maximum(np.abs(h - prev_c), np.abs(low - prev_c)))
         atr = pd.Series(tr).rolling(14).mean().to_numpy(float)
     n = len(df)
     rl = np.full(n, np.nan)
@@ -125,5 +125,7 @@ def clear_signal_mask_cache() -> None:
 
 
 @lru_cache(maxsize=64)
-def barrier_cache_key(symbol: str, tf: str, hold: int, fee: float, slip: float, n: int, end_ts: str) -> str:
+def barrier_cache_key(
+    symbol: str, tf: str, hold: int, fee: float, slip: float, n: int, end_ts: str
+) -> str:
     return f"{symbol}|{tf}|{hold}|{fee}|{slip}|{n}|{end_ts}"

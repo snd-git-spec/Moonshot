@@ -66,9 +66,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         if args.synthetic:
             context = {btc: synthetic_ohlcv(btc, args.bars)}
         else:
-            context = {
-                btc: fetch_historical(btc, cfg.timeframe, args.bars, refresh=args.refresh)
-            }
+            context = {btc: fetch_historical(btc, cfg.timeframe, args.bars, refresh=args.refresh)}
         print(f"(BTC regime context loaded for filter parity; not traded: {btc})")
     data = prepare_data(raw, cfg, context=context)
     t0 = min(sd.bars[0].Index for sd in data.values())

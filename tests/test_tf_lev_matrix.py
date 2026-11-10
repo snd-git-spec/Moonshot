@@ -160,16 +160,15 @@ def test_best_by_tf_stale_rejected(monkeypatch):
         "prior_ret": -0.2,
     }
     assert _best_by_tf_seed_ok(blob, prior_ret=-0.2, oos_ret=0.1) is False
-    assert _best_by_tf_seed_ok(
-        {**blob, "prior_ret": 0.05}, prior_ret=0.05, oos_ret=0.1
-    )
+    assert _best_by_tf_seed_ok({**blob, "prior_ret": 0.05}, prior_ret=0.05, oos_ret=0.1)
 
 
 def test_empty_robust_set_keeps_baseline():
     assert _rank_matrix_rows([]) is None
-    assert _rank_matrix_rows(
-        [{"tf": "5m", "week_ret": 0.9, "robust_ok": False, "skip": False}]
-    ) is None
+    assert (
+        _rank_matrix_rows([{"tf": "5m", "week_ret": 0.9, "robust_ok": False, "skip": False}])
+        is None
+    )
 
 
 def test_truncated_holdout_skipped():

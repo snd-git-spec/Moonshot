@@ -165,7 +165,9 @@ def write_fold_artifacts(
     folds_path.write_text(json.dumps({"folds": folds}, indent=2, default=str) + "\n")
     metrics: dict[str, Any] = {
         **sortino_definition_meta(),
-        "fold_sortino": [None if (x is None or not math.isfinite(float(x))) else float(x) for x in fold_sortinos],
+        "fold_sortino": [
+            None if (x is None or not math.isfinite(float(x))) else float(x) for x in fold_sortinos
+        ],
         "p25_fold_sortino": lower_quantile_metric(fold_sortinos),
     }
     if fold_sharpes is not None:

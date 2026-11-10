@@ -156,9 +156,7 @@ def _freeze_risk(base: Config, c: Config) -> Config:
         require_h4_bias=bool(getattr(c, "require_h4_bias", False)),
         require_daily_align=bool(getattr(c, "require_daily_align", False)),
         require_weekly_bias=bool(getattr(c, "require_weekly_bias", False)),
-        ema_weekly_period=int(
-            max(2, min(30, int(getattr(c, "ema_weekly_period", 10) or 10)))
-        ),
+        ema_weekly_period=int(max(2, min(30, int(getattr(c, "ema_weekly_period", 10) or 10)))),
         require_rising_adx=bool(c.require_rising_adx),
         require_squeeze=bool(c.require_squeeze),
         require_rsi_veto=bool(c.require_rsi_veto),
@@ -528,9 +526,7 @@ def _sync_champion_peak(state: dict, peak: dict | None) -> None:
     if not peak or not peak.get("knobs"):
         return
     blob = dict(peak)
-    blob["week_ret_peak"] = float(
-        blob.get("week_ret_peak") or blob.get("week_ret") or 0
-    )
+    blob["week_ret_peak"] = float(blob.get("week_ret_peak") or blob.get("week_ret") or 0)
     state["champion_peak"] = blob
     state["champion"] = dict(blob)
 
@@ -1028,10 +1024,13 @@ def _scale_bar_knobs_for_tf(base: Config, new_tf: str) -> Config:
     if old_m <= 0 or abs(new_m - old_m) < 1e-9:
         return replace(base, timeframe=str(new_tf).strip().lower())
     ratio = float(new_m) / float(old_m)
+
     # Coarser TF → fewer bars for same wall-clock; finer → more bars.
     # Scale lookbacks so wall-clock horizon stays roughly constant.
     def _sc(val: int, lo: int, hi: int) -> int:
-        return int(max(lo, min(hi, round(int(val) / ratio if ratio >= 1 else int(val) * (1.0 / ratio)))))
+        return int(
+            max(lo, min(hi, round(int(val) / ratio if ratio >= 1 else int(val) * (1.0 / ratio))))
+        )
 
     # When going 5m → 1h, ratio=12: same wall-clock needs FEWER bars → divide.
     # When going 1h → 5m, ratio=1/12: need MORE bars → multiply via 1/ratio branch above.
@@ -1188,9 +1187,7 @@ def _rank_matrix_rows(rows: list[dict] | None) -> dict | None:
     return best
 
 
-def _rank_matrix_rows_escape(
-    rows: list[dict] | None, *, base_week_ret: float
-) -> dict | None:
+def _rank_matrix_rows_escape(rows: list[dict] | None, *, base_week_ret: float) -> dict | None:
     """When no robust cell exists and Live is red, pick the least-bad matrix week.
 
     Requires the cell week to beat the deployed book by ≥2pp (or be green while

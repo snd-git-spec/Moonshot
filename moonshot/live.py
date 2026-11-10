@@ -453,9 +453,8 @@ class LiveRunner:
                     if self.risk.bleed_halt and not st.get("paper_bleed_halt"):
                         # Hunt deployed (or flag cleared) — allow new entries.
                         self.risk.set_bleed_halt(False)
-                    elif (
-                        not self.risk.bleed_halt
-                        and (info.get("bleed") or st.get("paper_bleed_halt"))
+                    elif not self.risk.bleed_halt and (
+                        info.get("bleed") or st.get("paper_bleed_halt")
                     ):
                         why = (
                             f"paper bleed halt — last {info.get('n') or '?'} closes red "
