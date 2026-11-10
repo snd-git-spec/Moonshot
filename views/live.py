@@ -993,7 +993,7 @@ def live_panel() -> None:
                 "ok" if paper_ok else "warn",
             ),
             (
-                f"Live book {lev}× · {tf}" if lev else f"Live book {tf}",
+                f"Trading champion {lev}× · {tf}" if lev else f"Trading champion {tf}",
                 "muted",
             ),
         ]
@@ -1349,13 +1349,13 @@ def live_panel() -> None:
 
         section_header(
             "Recent searches",
-            "Newest first — did Live switch books? (not a list of every lev×TF cell tried)",
+            "Newest first — did paper switch off the champion? (not every lev×TF cell tried)",
         )
         st.caption(
-            "**Live book** columns = what paper kept running after that pass. "
-            "Hunt still scores other leverages/timeframes each pass — see "
-            "**Leverage bake-off** above and the **Matrix scored** column. "
-            "Repeated 10×@5m means nothing else won the gates, not that hunt only tried 10×@5m."
+            "Paper should only trade the **champion**. "
+            "**Trading now** = that champion book (the only thing placing paper trades). "
+            "**Matrix scored** = other lev×TF/candidates hunt tested that pass and rejected. "
+            "Repeated 10×@5m means hunt did not find a new champion — not that it only searched 10×@5m."
         )
         if held_streak >= 3:
             st.caption(
@@ -1413,10 +1413,10 @@ def live_panel() -> None:
                 "Search #": running_gen,
                 "What happened": f"In progress · {mode}",
                 "Matrix scored": "running…",
-                "Live book": "—",
+                "Trading now": "—",
                 "Score": "—",
                 "Win rate": "—",
-                f"{_HOLDOUT} (live book)": "—",
+                f"{_HOLDOUT} (champion)": "—",
                 "Avg profit": "—",
             })
             seen_gen.add(int(running_gen))
@@ -1436,51 +1436,52 @@ def live_panel() -> None:
             tested = h.get("tested")
             why = str(h.get("promote_reason") or "")
             if h.get("improved"):
-                result = f"Applied to live bot ({why})" if why else "Applied to live bot"
+                result = (
+                    f"New champion deployed to paper ({why})"
+                    if why
+                    else "New champion deployed to paper"
+                )
                 week_note = (
                     f"{float(wr):+.0%}" if wr is not None else "—"
                 )
             elif tested is not None:
-                # Money truth: not applied ⇒ current setup stayed. Do not
-                # frame an internal path name (matrix_escape, etc.) as a
-                # "rejected best" — that read as if something beat Live.
+                # Money truth: not applied ⇒ paper still on champion.
                 gate = str(h.get("material_why") or "").strip()
                 if gate and why not in ("", "baseline", "hold"):
                     result = (
-                        f"Kept live book · checked {tested} ideas · "
-                        f"no promote ({gate})"
+                        f"Still champion · checked {tested} ideas · "
+                        f"no replace ({gate})"
                     )
                 else:
                     result = (
-                        f"Kept live book · checked {tested} ideas · "
-                        "nothing better to deploy"
+                        f"Still champion · checked {tested} ideas · "
+                        "nothing beat champion"
                     )
-                # HOLD rows re-report the held book's week — not a new find.
                 week_note = (
-                    f"{float(wr):+.0%} (unchanged live)"
+                    f"{float(wr):+.0%} (champion unchanged)"
                     if wr is not None else "—"
                 )
             else:
-                result = "Kept live book"
+                result = "Still champion"
                 week_note = (
-                    f"{float(wr):+.0%} (unchanged live)"
+                    f"{float(wr):+.0%} (champion unchanged)"
                     if wr is not None else "—"
                 )
             sc = h.get("score")
             lev = h.get("leverage")
             tf = h.get("timeframe") or "—"
             try:
-                live_book = f"{int(lev)}×@{tf}" if lev is not None else str(tf)
+                trading_now = f"{int(lev)}×@{tf}" if lev is not None else str(tf)
             except (TypeError, ValueError):
-                live_book = str(tf)
+                trading_now = str(tf)
             rows.append({
                 "Search #": h.get("generation"),
                 "What happened": result,
                 "Matrix scored": _matrix_scored_label(h),
-                "Live book": live_book,
+                "Trading now": trading_now,
                 "Score": sc if sc is not None else "—",
                 "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                f"{_HOLDOUT} (live book)": week_note,
+                f"{_HOLDOUT} (champion)": week_note,
                 "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
             })
             if len(rows) >= 24:
