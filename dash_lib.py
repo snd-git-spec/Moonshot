@@ -594,9 +594,19 @@ def topbar(balance: Optional[float] = None, score: Optional[int] = None,
     except Exception:
         frozen = False
 
-    hist = state.get("history") or []
-    pass_n = len(hist) if isinstance(hist, list) else 0
-    busy = bool(state.get("busy"))
+    # Real hunt counter = generation / improve_passes — NOT len(history).
+    # History is a capped ring buffer (≤300); using its length showed "#300"
+    # and hid the Hunt chip entirely when history was cleared.
+    try:
+        pass_n = int(state.get("generation") or state.get("improve_passes") or 0)
+    except (TypeError, ValueError):
+        pass_n = 0
+    if pass_n <= 0:
+        try:
+            pass_n = int((state.get("hunt_event") or {}).get("generation") or 0)
+        except (TypeError, ValueError):
+            pass_n = 0
+    busy = bool(state.get("busy")) or str((state.get("hunt_event") or {}).get("kind") or "") == "improve_start"
     age = heartbeat_age(eq_m)
 
     # ---- left: mode badges ----
@@ -639,10 +649,11 @@ def topbar(balance: Optional[float] = None, score: Optional[int] = None,
         right.append(_status_item("Book", f"<b>{book}</b>"))
     if score is not None:
         right.append(_status_item("Score", f"<b>{int(score)}/100</b>"))
-    if pass_n:
-        # Always show the search # — "Hunting…" alone looked like the ticker died.
-        hunt_lbl = f"Hunting #{int(pass_n)}" if busy else f"#{int(pass_n)}"
+    if pass_n > 0:
+        hunt_lbl = f"Hunting #{pass_n}" if busy else f"#{pass_n}"
         right.append(_status_item("Hunt", f"<b>{hunt_lbl}</b>"))
+    else:
+        right.append(_status_item("Hunt", "<b>—</b>"))
     hb = format_age(age)
     hb_cls = "up" if heartbeat_kind(age) == "ok" else ("warn" if heartbeat_kind(age) == "muted" else "down")
     right.append(_status_item("Pulse", f'<b class="{hb_cls}">{hb}</b>'))
