@@ -1,0 +1,34 @@
+---
+description: DigitalOcean droplet is the only production Moonshot runtime — never treat local Mac as live
+alwaysApply: true
+---
+
+# Cloud is canonical
+
+**Production Moonshot runs only on the DigitalOcean droplet.**
+
+- Host: `178.62.113.173` / https://178-62-113-173.sslip.io/
+- App path: `/opt/moonshot`
+- SSH: `ssh -i ~/.ssh/moonshot_do root@178.62.113.173`
+- Deploy: `./scripts/deploy_do.sh` (rsync + restart). **`git push` alone does NOT update live.**
+
+## Required on every “is it working / fixed / hunting?” ask
+
+Read **cloud** state, not local:
+
+1. `systemctl is-active moonshot` + processes include `moonshot autopilot` (not just streamlit/paper)
+2. `/opt/moonshot/.moonshot_autopilot.json` — generation, busy, last_improve_at, hunt_event
+3. Cloud `.env` book + last paper closes / bleed on the droplet
+4. After any code fix: run `./scripts/deploy_do.sh` and re-read cloud before claiming fixed
+
+## Forbidden
+
+- Treating local Mac autopilot/dashboard/state as the live scoreboard
+- Claiming “pushed” = “live” without droplet deploy + cloud verify
+- Leaving a local hunt running that competes with cloud (stop local keepalive)
+
+## After code changes the user cares about live
+
+1. Commit + push to GitHub
+2. `./scripts/deploy_do.sh`
+3. SSH-verify generation advancing + autopilot process alive on the droplet

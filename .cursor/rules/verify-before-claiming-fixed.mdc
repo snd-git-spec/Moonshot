@@ -9,12 +9,14 @@ Never tell the user something is fixed, applied, improved, profitable, or "done"
 
 ## Required before "fixed" / "applied" / "working now"
 
-1. Read the live state the UI reads (not only the code you edited).
-2. Confirm `.env` matches the intended book (`STRATEGY` / `TIMEFRAME` / `LEVERAGE`).
-3. Confirm the **paper process** is on that same book (environ or Live feed) — `.env` alone is not enough.
+0. **Cloud first.** Production is the DigitalOcean droplet (`178.62.113.173` / sslip.io). Local Mac state is not live. After code changes: `git push` **and** `./scripts/deploy_do.sh`, then verify on the droplet.
+1. Read the live state the **cloud** UI reads (not only the code you edited).
+2. Confirm cloud `.env` matches the intended book (`STRATEGY` / `TIMEFRAME` / `LEVERAGE`).
+3. Confirm the **cloud paper process** is on that same book (environ or Live feed) — `.env` alone is not enough.
 4. Confirm the Live metric they care about (week % / $, DD, last closes) with a real read after restart if one was needed.
 5. If history/elite/pending was touched, confirm it was not wiped.
-6. If hunt "found" a book: prove `.env` + paper book changed; otherwise say **not applied**.
+6. If hunt "found" a book: prove cloud `.env` + paper book changed; otherwise say **not applied**.
+7. Confirm cloud has a live `moonshot autopilot` process — Streamlit/paper pulse alone is not hunt.
 
 ## Do not
 

@@ -2,6 +2,15 @@
 
 Practice trading bot for MEXC futures (fake money first) plus a simple dashboard.
 
+## Production (canonical)
+
+**Live system = DigitalOcean droplet only** — not the local Mac.
+
+- Dashboard: https://178-62-113-173.sslip.io/
+- Host: `178.62.113.173` · app: `/opt/moonshot`
+- After code changes: `git push` **then** `./scripts/deploy_do.sh` (push alone does not update live)
+- SSH: `ssh -i ~/.ssh/moonshot_do root@178.62.113.173`
+
 ## Setup (once)
 
 ```bash
