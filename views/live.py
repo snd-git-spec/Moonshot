@@ -1177,12 +1177,12 @@ def live_panel() -> None:
 
         hero_stats = [
             {
-                "label": f"Live setup · {_HOLDOUT}",
+                "label": f"Champion (trading) · {_HOLDOUT}",
                 "value": f"${week_final:,.0f}",
                 "hint": (
                     f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
                     f"simulated from past candles · goal ≥ {week_goal:.0%} · "
-                    f"{week_n} trades in that holdout"
+                    f"{week_n} trades in that holdout · this is what paper trades"
                 ),
                 "tone": week_tone,
             },
@@ -1199,7 +1199,7 @@ def live_panel() -> None:
                     "tone": "good" if show_score >= 70 else "",
                 },
                 {
-                    "label": "Live wallet now",
+                    "label": "Paper wallet now",
                     "value": f"${last_eq:,.2f}" if last_eq is not None else "—",
                     "hint": bal_hint,
                     "tone": bal_tone,
