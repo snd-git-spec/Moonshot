@@ -1349,13 +1349,48 @@ def live_panel() -> None:
 
         section_header(
             "Recent searches",
-            "Newest first — did this search find a better setup?",
+            "Newest first — did Live switch books? (not a list of every lev×TF cell tried)",
+        )
+        st.caption(
+            "**Live book** columns = what paper kept running after that pass. "
+            "Hunt still scores other leverages/timeframes each pass — see "
+            "**Leverage bake-off** above and the **Matrix scored** column. "
+            "Repeated 10×@5m means nothing else won the gates, not that hunt only tried 10×@5m."
         )
         if held_streak >= 3:
             st.caption(
                 f"Last {held_streak} searches kept the same setup (score {score}/100). "
                 "That means nothing better was found — not a frozen screen."
             )
+
+        def _matrix_scored_label(hrow: dict) -> str:
+            ladder = hrow.get("leverage_ladder") or []
+            if not isinstance(ladder, list) or not ladder:
+                tested_n = hrow.get("tested")
+                return f"{tested_n} knob ideas" if tested_n is not None else "—"
+            cells = []
+            tfs: set[str] = set()
+            levs: set[int] = set()
+            for cell in ladder:
+                try:
+                    lv = int(cell.get("leverage") or 0)
+                    tf = str(cell.get("timeframe") or cell.get("tf") or "")
+                except (TypeError, ValueError):
+                    continue
+                if not lv or not tf:
+                    continue
+                levs.add(lv)
+                tfs.add(tf)
+                cells.append(f"{lv}×@{tf}")
+            if not cells:
+                tested_n = hrow.get("tested")
+                return f"{tested_n} knob ideas" if tested_n is not None else "—"
+            lev_s = "/".join(f"{x}×" for x in sorted(levs))
+            tf_s = "/".join(sorted(tfs, key=lambda t: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(t, 9)))
+            tested_n = hrow.get("tested")
+            extra = f" · {tested_n} knob ideas" if tested_n is not None else ""
+            return f"{len(cells)} cells · {lev_s} × {tf_s}{extra}"
+
         # Dedupe by generation (history can log explore+polish same gen)
         seen_gen: set[int] = set()
         rows = []
@@ -1377,12 +1412,11 @@ def live_panel() -> None:
             rows.append({
                 "Search #": running_gen,
                 "What happened": f"In progress · {mode}",
-                "Leverage": "—",
-                "Candle": "—",
+                "Matrix scored": "running…",
+                "Live book": "—",
                 "Score": "—",
                 "Win rate": "—",
-                f"{_HOLDOUT} history": "—",
-                "Trades in test": "—",
+                f"{_HOLDOUT} (live book)": "—",
                 "Avg profit": "—",
             })
             seen_gen.add(int(running_gen))
@@ -1413,40 +1447,40 @@ def live_panel() -> None:
                 gate = str(h.get("material_why") or "").strip()
                 if gate and why not in ("", "baseline", "hold"):
                     result = (
-                        f"Kept current setup · checked {tested} ideas · "
+                        f"Kept live book · checked {tested} ideas · "
                         f"no promote ({gate})"
                     )
                 else:
                     result = (
-                        f"Kept current setup · checked {tested} ideas · "
+                        f"Kept live book · checked {tested} ideas · "
                         "nothing better to deploy"
                     )
                 # HOLD rows re-report the held book's week — not a new find.
                 week_note = (
-                    f"{float(wr):+.0%} (current setup)"
+                    f"{float(wr):+.0%} (unchanged live)"
                     if wr is not None else "—"
                 )
             else:
-                result = "Kept current setup"
+                result = "Kept live book"
                 week_note = (
-                    f"{float(wr):+.0%} (current setup)"
+                    f"{float(wr):+.0%} (unchanged live)"
                     if wr is not None else "—"
                 )
             sc = h.get("score")
             lev = h.get("leverage")
+            tf = h.get("timeframe") or "—"
             try:
-                lev_s = f"{int(lev)}×" if lev is not None else "—"
+                live_book = f"{int(lev)}×@{tf}" if lev is not None else str(tf)
             except (TypeError, ValueError):
-                lev_s = "—"
+                live_book = str(tf)
             rows.append({
                 "Search #": h.get("generation"),
                 "What happened": result,
-                "Leverage": lev_s,
-                "Candle": h.get("timeframe") or "—",
+                "Matrix scored": _matrix_scored_label(h),
+                "Live book": live_book,
                 "Score": sc if sc is not None else "—",
                 "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                f"{_HOLDOUT} history": week_note,
-                "Trades in test": h.get("test_n"),
+                f"{_HOLDOUT} (live book)": week_note,
                 "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
             })
             if len(rows) >= 24:
