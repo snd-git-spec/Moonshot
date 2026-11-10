@@ -91,6 +91,23 @@ def _run_scoreboard_watchdog() -> dict:
         except (TypeError, ValueError, AttributeError):
             live_week = None
 
+    if champ_fp[0] and champ_fp == env_fp and st.get("pending_champion_rescue"):
+        # Already deployed on champion S/T/L — stuck pending only blocks heavy hunt.
+        st["pending_champion_rescue"] = False
+        st["champ_trail_streak"] = 0
+        log.info(
+            "SCOREBOARD WATCHDOG · cleared stuck pending_champion_rescue "
+            "(already on champ %s %sx@%s)",
+            champ_fp[0],
+            champ_fp[2],
+            champ_fp[1],
+        )
+        _live_feed(
+            "rescue_cleared",
+            f"cleared stuck pending_champion_rescue — already on {champ_fp[0]} "
+            f"{champ_fp[2]}x@{champ_fp[1]}",
+        )
+
     if champ_fp[0] and champ_fp != env_fp and champ_week_f is not None:
         trail = champ_week_f - float(live_week if live_week is not None else -1.0)
         if trail >= float(HUNT_CHAMP_TRAIL_PP) and champ_week_f >= 0.10:
@@ -272,10 +289,6 @@ class PaperSupervisor:
 
 
 def cmd_autopilot(args: argparse.Namespace) -> None:
-    try:
-        clear_stale_live_caches()
-    except Exception as e:
-        log.warning("stale cache clear on autopilot start: %s", e)
     """
     Leave this running:
       - paper trading stays up
@@ -283,6 +296,17 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
       - only keeps configs that are profitable on BOTH history halves
       - never turns on real-money trading
     """
+    try:
+        clear_stale_live_caches()
+    except Exception as e:
+        log.warning("stale cache clear on autopilot start: %s", e)
+    # launchd KeepAlive does not maintain logs/autopilot.pid — write it ourselves
+    try:
+        pid_path = ROOT / "logs" / "autopilot.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(os.getpid()))
+    except OSError as e:
+        log.warning("could not write autopilot.pid: %s", e)
     if os.getenv("LIVE_TRADING_ENABLED") == "1":
         raise ConfigError(
             "Autopilot refuses to start while LIVE_TRADING_ENABLED=1. "
@@ -301,6 +325,25 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     hunt = not bool(getattr(args, "tune_only", False))
 
     state = _load_autopilot_state()
+    # Clamp corrupt generation jumps (e.g. 1559 → 9999) back to improve_passes.
+    try:
+        gen_now = int(state.get("generation") or 0)
+        passes = int(state.get("improve_passes") or 0)
+        if passes > 0 and gen_now > passes + 50:
+            log.warning(
+                "generation %s >> improve_passes %s — clamping to %s",
+                gen_now,
+                passes,
+                passes,
+            )
+            state["generation"] = passes
+            _live_feed(
+                "gen_clamp",
+                f"clamped corrupt generation {gen_now} → {passes}",
+                generation=passes,
+            )
+    except (TypeError, ValueError):
+        pass
     state["started_at"] = _utc_now().isoformat()
     state["mode"] = "hunt" if hunt else ("continuous" if continuous else f"every_{every_h}h")
     state["cooldown_seconds"] = cooldown
@@ -308,6 +351,7 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     state["hunt"] = hunt
     state["hunt_symbols"] = list(symbols)
     state["paper_symbols"] = list(paper_symbols)
+    state["busy"] = False
     _save_autopilot_state(state)
 
     if args.improve_only:

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from moonshot.hunt.constants import (  # noqa: E402
+    ENV_PATH,
     _env_book_fingerprint,
     _load_autopilot_state,
 )
@@ -35,6 +38,94 @@ from moonshot.paths import DB_PATH  # noqa: E402
 # Champ week must beat Live by this much (and be at least this strong) to flag strand.
 CHAMP_TRAIL_FAIL_PP = 0.15
 CHAMP_MIN_WEEK = 0.10
+# Hunt mode with a dead autopilot process is never "SCOREBOARD OK".
+AUTOPILOT_PID_PATH = ROOT / "logs" / "autopilot.pid"
+HUNT_STALE_IMPROVE_HOURS = 6.0
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _pgrep_autopilot() -> int:
+    """Find live autopilot even when launchd did not refresh logs/autopilot.pid."""
+    import subprocess
+
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", "python -m moonshot autopilot"],
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return 0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return int(line.split()[0])
+        except ValueError:
+            continue
+    return 0
+
+
+def _autopilot_process() -> dict:
+    raw = ""
+    if AUTOPILOT_PID_PATH.exists():
+        raw = AUTOPILOT_PID_PATH.read_text().strip()
+    try:
+        pid = int(raw) if raw else 0
+    except ValueError:
+        pid = 0
+    alive = _pid_alive(pid)
+    source = "pidfile" if alive else "none"
+    if not alive:
+        # launchd KeepAlive does not maintain our pidfile — fall back to pgrep
+        probed = _pgrep_autopilot()
+        if probed and _pid_alive(probed):
+            pid = probed
+            alive = True
+            source = "pgrep"
+            try:
+                AUTOPILOT_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+                AUTOPILOT_PID_PATH.write_text(str(pid))
+            except OSError:
+                pass
+    return {
+        "pid": pid,
+        "alive": alive,
+        "pid_path": str(AUTOPILOT_PID_PATH),
+        "source": source,
+    }
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _hours_since(ts: str | None) -> float | None:
+    dt = _parse_iso(ts)
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
 
 
 def _paper_closes(n: int = 10) -> list[dict]:
@@ -136,6 +227,85 @@ def check() -> dict:
     failures: list[str] = []
     warnings: list[str] = []
 
+    proc = _autopilot_process()
+    mode = str(st.get("mode") or "")
+    last_improve_at = str(st.get("last_improve_at") or "")
+    improve_age_h = _hours_since(last_improve_at)
+    started_age_h = _hours_since(str(st.get("started_at") or ""))
+    hunt_ev = st.get("hunt_event") or {}
+    hunt_ev_age_h = _hours_since(str(hunt_ev.get("ts") or ""))
+    if mode == "hunt" and not proc["alive"]:
+        failures.append(
+            f"HUNT_DEAD: mode=hunt but autopilot pid={proc['pid'] or '?'} "
+            f"not running (last_improve_at={last_improve_at or 'missing'})"
+        )
+    elif mode == "hunt" and proc["alive"]:
+        # Fresh restart: started_at/hunt_event beat a stale last_improve_at.
+        recently_started = started_age_h is not None and started_age_h < HUNT_STALE_IMPROVE_HOURS
+        recent_hunt_ev = hunt_ev_age_h is not None and hunt_ev_age_h < HUNT_STALE_IMPROVE_HOURS
+        if (
+            improve_age_h is not None
+            and improve_age_h >= HUNT_STALE_IMPROVE_HOURS
+            and not recently_started
+            and not recent_hunt_ev
+            and not st.get("busy")
+        ):
+            failures.append(
+                f"HUNT_STALE: last_improve_at {improve_age_h:.1f}h ago "
+                f"(>{HUNT_STALE_IMPROVE_HOURS:.0f}h) while mode=hunt busy=False"
+            )
+        elif (
+            improve_age_h is not None
+            and improve_age_h >= HUNT_STALE_IMPROVE_HOURS
+            and st.get("busy")
+            and not recently_started
+            and not recent_hunt_ev
+        ):
+            warnings.append(
+                f"hunt busy=True but last_improve_at {improve_age_h:.1f}h ago — "
+                "confirm pass still progressing"
+            )
+
+    if (
+        st.get("pending_champion_rescue")
+        and champ_fp[0]
+        and champ_fp == env_fp
+    ):
+        failures.append(
+            "STUCK_RESCUE: pending_champion_rescue=True but already on champ "
+            f"{champ_fp[0]} {champ_fp[2]}x@{champ_fp[1]} — heavy hunt blocked"
+        )
+
+    try:
+        gen_now = int(st.get("generation") or 0)
+        passes = int(st.get("improve_passes") or 0)
+    except (TypeError, ValueError):
+        gen_now, passes = 0, 0
+    if passes > 0 and gen_now > passes + 50:
+        failures.append(
+            f"GEN_CORRUPT: generation={gen_now} >> improve_passes={passes}"
+        )
+
+    # Paper tick adx vs .env — catches partial-knob apply drift.
+    env_adx = None
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            if line.strip().startswith("ADX_ENTER="):
+                try:
+                    env_adx = float(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                except ValueError:
+                    env_adx = None
+                break
+    live_adx = live.get("adx_enter")
+    try:
+        live_adx_f = float(live_adx) if live_adx is not None else None
+    except (TypeError, ValueError):
+        live_adx_f = None
+    if env_adx is not None and live_adx_f is not None and abs(env_adx - live_adx_f) >= 0.5:
+        failures.append(
+            f"KNOB_DRIFT: paper live adx_enter={live_adx_f} != .env ADX_ENTER={env_adx}"
+        )
+
     if live_fp[1] and live_fp[2]:
         if (live_fp[1], str(live_fp[2])) != (env_fp[1], env_fp[2]):
             failures.append(
@@ -207,6 +377,14 @@ def check() -> dict:
             "bleed_halt": live.get("bleed_halt"),
             "message": str(live.get("message") or "")[:160],
         },
+        "autopilot": {
+            **proc,
+            "mode": mode,
+            "busy": bool(st.get("busy")),
+            "generation": st.get("generation"),
+            "last_improve_at": last_improve_at or None,
+            "improve_age_hours": round(improve_age_h, 2) if improve_age_h is not None else None,
+        },
         "bleed": bleed,
         "paper_bleed_halt": st.get("paper_bleed_halt"),
         "paper_bleed_window_start": st.get("paper_bleed_window_start"),
@@ -245,6 +423,12 @@ def main() -> int:
         print(
             f"champ {ch['strategy']} {ch['leverage']}x@{ch['timeframe']} "
             f"week={ch['week_ret']} match={ch['matches_env']}"
+        )
+        ap = report.get("autopilot") or {}
+        print(
+            f"autopilot alive={ap.get('alive')} pid={ap.get('pid')} "
+            f"mode={ap.get('mode')} gen={ap.get('generation')} "
+            f"busy={ap.get('busy')} improve_age_h={ap.get('improve_age_hours')}"
         )
         print(f"bleed {report['bleed']} halt_flag={report['paper_bleed_halt']}")
         print(f"closes5_sum {report['close_pnl_sum5']} risk={report['risk']}")

@@ -1319,6 +1319,18 @@ def improve_once(
                     best_week_now * 100,
                 )
             else:
+                # Already on the champion book — pending_rescue must not stick
+                # forever (it forces skip_heavy and blocks real hunt).
+                if pending_drift and _cfg_fingerprint(ch_cfg) == _cfg_fingerprint(base):
+                    state["pending_champion_rescue"] = False
+                    state["champ_trail_streak"] = 0
+                    _save_autopilot_state(state)
+                    log.info(
+                        "champion rescue cleared — already on champ fingerprint "
+                        "(live_week=%+.0f%% champ=%+.0f%%)",
+                        live_week_now * 100,
+                        champ_week_live * 100,
+                    )
                 log.info(
                     "champion trail · live_week=%+.0f%% champ=%+.0f%% trail=%+.0fpp "
                     "streak=%d pending_drift=%s",
