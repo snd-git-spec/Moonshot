@@ -22,11 +22,12 @@ from moonshot.hunt.scoring import (
 
 
 def test_search_mode_mix_with_champion() -> None:
+    # Matrix hunt mix: ~40% polish / 40% explore / 20% breakout
     modes = [_hunt_search_mode(i, 0, True, has_champion=True) for i in range(20)]
     n = len(modes)
-    assert modes.count("breakout") / n == 0.1  # every 10th
-    assert 0.15 <= modes.count("explore") / n <= 0.25
-    assert modes.count("polish") / n >= 0.65
+    assert modes.count("breakout") / n == 0.2
+    assert modes.count("explore") / n == 0.4
+    assert modes.count("polish") / n == 0.4
 
 
 def test_search_mode_stuck_prefers_breakout_or_explore() -> None:

@@ -45,3 +45,8 @@ cost_share = (sum(t.fees) + sum(t.funding)) / gross_dollar_pnl
 ```
 
 - The **40%** threshold applies to **cost_share (dollars)**, not to gross R.
+
+## Freeze ended
+
+`2026-11-06T12:13:21+00:00` — user requested **always apply the best**. `AUTOPILOT_FROZEN=0`.
+Champion peak (gen 1034, ADX22) synced onto Live; future research promotes may rewrite `.env` again.

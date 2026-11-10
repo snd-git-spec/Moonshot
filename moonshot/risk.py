@@ -51,6 +51,8 @@ class RiskEngine:
         self.backtest_soft_ret: Optional[float] = None
         self.backtest_week_ret: Optional[float] = None
         self.drift_halt = False
+        # Last-N paper closes all red — block new entries until hunt deploys
+        self.bleed_halt = False
 
     def set_backtest_band(
         self,
@@ -149,7 +151,7 @@ class RiskEngine:
                 )
 
     def trading_allowed(self, ts: pd.Timestamp) -> bool:
-        if self.kill_switch_active or self.daily_halt:
+        if self.kill_switch_active or self.daily_halt or self.bleed_halt:
             return False
         if self.pause_until is not None and ts < self.pause_until:
             return False
@@ -162,6 +164,20 @@ class RiskEngine:
             self.consecutive_losses = 0
             self.pause_until = None
         return True
+
+    def set_bleed_halt(self, on: bool, reason: str = "") -> None:
+        """Paper-only: stop new entries while last-N closes are all losers."""
+        was = bool(self.bleed_halt)
+        self.bleed_halt = bool(on)
+        if on:
+            self.halt_reason = reason or "paper bleed halt — waiting for hunt deploy"
+            if not was and not self.silent:
+                log.warning("BLEED HALT: %s", self.halt_reason)
+        elif was:
+            if str(self.halt_reason or "").startswith("paper bleed"):
+                self.halt_reason = ""
+            if not self.silent:
+                log.info("bleed halt cleared — new entries allowed")
 
     def evaluate(
         self,

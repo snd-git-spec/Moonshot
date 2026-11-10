@@ -263,8 +263,11 @@ class LiveRunner:
             trips = data.get("circuit_trips") or []
             if isinstance(trips, list) and trips:
                 self.risk.circuit_trips = [str(x) for x in trips]
-            if data.get("halt_reason") and not self.risk.halt_reason:
-                self.risk.halt_reason = str(data.get("halt_reason"))
+            # Never revive a stale bleed halt_reason — trading_allowed uses bleed_halt,
+            # but logs/UI treat halt_reason as the scoreboard and look "stuck".
+            hr = str(data.get("halt_reason") or "")
+            if hr and not self.risk.halt_reason and not hr.startswith("paper bleed"):
+                self.risk.halt_reason = hr
             rr = data.get("rolling_r") or []
             if isinstance(rr, list) and rr:
                 self.risk.rolling_r = [float(x) for x in rr]
@@ -343,6 +346,25 @@ class LiveRunner:
                 log.warning("risk snapshot restore failed: %s", e)
         if not self.live:
             self._restore_runtime()
+            # Re-arm bleed circuit from DB + autopilot flag (survives restart).
+            with contextlib.suppress(Exception):
+                from moonshot.hunt.constants import (
+                    PAPER_BLEED_HALT_ENTRIES,
+                    _load_autopilot_state,
+                )
+                from moonshot.hunt.scoring import _paper_bleed
+
+                if PAPER_BLEED_HALT_ENTRIES:
+                    st = _load_autopilot_state()
+                    info = _paper_bleed()
+                    if info.get("bleed") or st.get("paper_bleed_halt"):
+                        why = (
+                            f"paper bleed halt — last {info.get('n') or '?'} closes red "
+                            f"(pnl {float(info.get('pnl') or 0):+.2f}) · waiting for hunt deploy"
+                        )
+                        self.risk.set_bleed_halt(True, why)
+                    else:
+                        self.risk.set_bleed_halt(False)
         try:
             while True:
                 if self.cfg.require_btc_regime and not _btc_symbol_in(self.symbols):
@@ -414,7 +436,43 @@ class LiveRunner:
                 require_rising_adx=bool(self.cfg.require_rising_adx),
                 leverage=int(self.cfg.leverage),
                 cache_age_sec=None if age is None else round(float(age), 1),
+                bleed_halt=bool(self.risk.bleed_halt),
             )
+        # Sync bleed circuit with hunt: clear when promote flipped the flag off.
+        if not self.live:
+            with contextlib.suppress(Exception):
+                from moonshot.hunt.constants import (
+                    PAPER_BLEED_HALT_ENTRIES,
+                    _load_autopilot_state,
+                )
+                from moonshot.hunt.scoring import _paper_bleed
+
+                if PAPER_BLEED_HALT_ENTRIES:
+                    st = _load_autopilot_state()
+                    info = _paper_bleed()
+                    if self.risk.bleed_halt and not st.get("paper_bleed_halt"):
+                        # Hunt deployed (or flag cleared) — allow new entries.
+                        self.risk.set_bleed_halt(False)
+                    elif (
+                        not self.risk.bleed_halt
+                        and (info.get("bleed") or st.get("paper_bleed_halt"))
+                    ):
+                        why = (
+                            f"paper bleed halt — last {info.get('n') or '?'} closes red "
+                            f"(pnl {float(info.get('pnl') or 0):+.2f}) · waiting for hunt deploy"
+                        )
+                        self.risk.set_bleed_halt(True, why)
+                        if not st.get("paper_bleed_halt"):
+                            from moonshot.hunt.constants import (
+                                _save_autopilot_state,
+                                _utc_now,
+                            )
+
+                            st["paper_bleed_halt"] = True
+                            st["paper_bleed_halt_at"] = _utc_now().isoformat()
+                            st["paper_bleed_pnl"] = float(info.get("pnl") or 0)
+                            st["pending_champion_rescue"] = True
+                            _save_autopilot_state(st)
 
     def _refresh_book_features(self) -> None:
         """Rebuild hunt-parity features (btc_adx / breadth) across the paper book."""
@@ -1032,6 +1090,39 @@ class LiveRunner:
             },
         )
         self.risk.register_trade_result(res.r_multiple, ts)
+        # Hard circuit: last N paper closes all red → no new entries until hunt deploys.
+        if not self.live:
+            with contextlib.suppress(Exception):
+                from moonshot.hunt.constants import (
+                    PAPER_BLEED_HALT_ENTRIES,
+                    _load_autopilot_state,
+                    _save_autopilot_state,
+                    _utc_now,
+                )
+                from moonshot.hunt.scoring import _paper_bleed
+
+                if PAPER_BLEED_HALT_ENTRIES:
+                    info = _paper_bleed()
+                    if info.get("bleed"):
+                        why = (
+                            f"paper bleed halt — last {info['n']} closes red "
+                            f"(pnl {float(info['pnl']):+.2f}) · waiting for hunt deploy"
+                        )
+                        self.risk.set_bleed_halt(True, why)
+                        st = _load_autopilot_state()
+                        st["paper_bleed_halt"] = True
+                        st["paper_bleed_halt_at"] = _utc_now().isoformat()
+                        st["paper_bleed_pnl"] = float(info.get("pnl") or 0)
+                        # Nudge hunt to escape this book
+                        st["pending_champion_rescue"] = True
+                        _save_autopilot_state(st)
+                        with contextlib.suppress(Exception):
+                            _live_feed(
+                                "bleed_halt",
+                                why,
+                                n=int(info.get("n") or 0),
+                                pnl=float(info.get("pnl") or 0),
+                            )
         # Paper drift vs promoted backtest band — halt new entries if far outside.
         if not self.live and self.risk.rolling_r:
             n = len(self.risk.rolling_r)

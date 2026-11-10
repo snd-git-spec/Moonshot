@@ -89,6 +89,10 @@ _SAFE_ENV_KEYS = {
     "KC_PERIOD",
     "KC_ATR_MULT",
     "REQUIRE_BTC_REGIME",
+    "REQUIRE_H4_BIAS",
+    "REQUIRE_DAILY_ALIGN",
+    "REQUIRE_WEEKLY_BIAS",
+    "EMA_WEEKLY_PERIOD",
     "ENABLE_TIME_STOP",
     "TIME_STOP_BARS",
     "TIME_STOP_MIN_R",
@@ -104,7 +108,7 @@ HUNT_TARGETS = {
     "max_dd": 0.55,
     "win_rate": 0.60,  # PRIMARY quality bar — aim for consistent winners, not coin-flip
     "test_return": 0.50,  # secondary: long OOS context (NOT the weekly claim)
-    "soft_return_floor": -0.30,
+    "soft_return_floor": -0.30,  # soft-check screen (pool entry); promote uses floors below
     "week_return": 1.00,  # PRIMARY: +100% in holdout window on leveraged book
     # Consider/promote gate — denser than old 6/7d so noise books don't promote.
     "week_min_trades": 10,
@@ -113,6 +117,12 @@ HUNT_TARGETS = {
     "week_stretch": 1.00,
     # Hard week floor before "targets met" (soft-only fireworks blocked)
     "week_hard_floor": 0.25,
+    # Period-robust promote/champion: no red prior 14d / long OOS / soft OOS.
+    # Stops crowning a +week book that bleeds every other window (year chart death).
+    "require_period_robust": True,
+    "oos_floor": 0.0,
+    "prior_week_floor": 0.0,
+    "soft_promote_floor": 0.0,
     # Reject classic kill illusion: hard quit-while-ahead while soft bleeds
     "block_kill_illusion": True,
     # Refuse .env patch when research venue ≠ MEXC and MEXC holdout ≤ 0 while research > 0
@@ -143,6 +153,9 @@ HUNT_CHAMPION_STALE_PP = 0.08  # stored peak − live reeval ≥ 8pp → floor u
 HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
 # A.4 — research allow-list includes 1h/4h; keep 5m/15m for continuity.
 HUNT_TF_ALLOW = ("5m", "15m", "1h", "4h")
+# Full bake-off TFs for like-for-like TF×lev matrix (same as allow list).
+HUNT_MATRIX_TFS = HUNT_TF_ALLOW
+HUNT_MATRIX_SOFT_CAP = 8  # soft+robust only top-N by hard week_ret
 HUNT_LEV_POLISH = (5, 7, 10)
 HUNT_LEV_BREAKOUT = (5, 7, 10, 15, 25)
 HUNT_LEV_FORCE = (5, 10, 15, 25)
@@ -158,8 +171,18 @@ HUNT_CHAMP_TRAIL_PP = 0.30  # champ − live week ≥ 30pp
 HUNT_CHAMP_TRAIL_PASSES = 2  # consecutive passes before rescue
 # Silence rotate may not deploy a book worse than peak same-window reeval by more than this.
 HUNT_SILENCE_MAX_PEAK_GAP_PP = 0.20
-# A.2 — disable silence family-swap; drift uses halt + optional peak restore only.
-HUNT_SILENCE_ROTATE_ENABLED = False
+# Silence rotate: escape hatch when paper is idle OR bleeding while hunt is stuck.
+# Without this, a stale +week champion freezes Live on a losing book forever.
+HUNT_SILENCE_ROTATE_ENABLED = True
+# Paper bleed: last N closed paper trades all losers → force rotate / pause path
+PAPER_BLEED_N = 5
+PAPER_BLEED_FORCE_ROTATE = True
+# Hard circuit: while bleeding, paper opens no new entries until hunt deploys
+# a different book (cleared on research/silence/manual promote).
+PAPER_BLEED_HALT_ENTRIES = True
+# After this many consecutive HOLDs, absolute period-robust floors soften to
+# "beat the deployed book" so hunt can leave a death setup.
+HUNT_STUCK_SOFTEN_HELD = 12
 # High-lev density floors (holdout week trades)
 HUNT_LEV15_MIN_WEEK_TRADES = 12
 HUNT_LEV25_MIN_WEEK_TRADES = 20
@@ -283,8 +306,11 @@ def _hunt_fetch_wf_raw(
     src = _normalize_range_source(source or _hunt_price_source())
     hs = _as_utc_ts(hunt_start)
     days = _hunt_calendar_days("wf", tf)
-    # Match WF_WARMUP_DAYS (60) — defined later with walk-forward constants.
-    t0 = hs - pd.Timedelta(days=int(days) + 60)
+    # Extra calendar warmup must still fit the bar cap (5m +60d was blowing
+    # past MAX_RANGE_BARS → WF disabled every pass → hunt stuck on HOLD).
+    max_d = _max_calendar_days_for_tf(tf)
+    extra = min(60, max(0, int(max_d) - int(days)))
+    t0 = hs - pd.Timedelta(days=int(days) + int(extra))
     warm = range_warmup_bars(tf)
     raw: dict = {}
     for s in symbols:
@@ -414,6 +440,60 @@ def _live_feed(kind: str, message: str, **extra) -> None:
     _save_autopilot_state(state)
 
 
+def _env_book_fingerprint() -> tuple[str, str, str]:
+    """STRATEGY / TIMEFRAME / LEVERAGE as currently written in .env (+ process)."""
+    vals = {"STRATEGY": "", "TIMEFRAME": "", "LEVERAGE": ""}
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, val = stripped.partition("=")
+            key = key.strip()
+            if key in vals:
+                vals[key] = val.strip().strip('"').strip("'")
+    for key in vals:
+        if not vals[key]:
+            vals[key] = str(os.environ.get(key, "") or "")
+    return (vals["STRATEGY"], vals["TIMEFRAME"], vals["LEVERAGE"])
+
+
+def _verify_env_updates(expected: dict) -> None:
+    """Fail loud if .env did not receive the promote keys (apply bugs)."""
+    if not ENV_PATH.exists():
+        raise ConfigError("promote verify: .env missing after patch")
+    got: dict[str, str] = {}
+    for line in ENV_PATH.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, val = stripped.partition("=")
+        got[key.strip()] = val.strip()
+    bad = []
+    for key, want in expected.items():
+        if key not in _SAFE_ENV_KEYS:
+            continue
+        have = got.get(key)
+        if have is None or str(have) != str(want):
+            bad.append(f"{key}: want={want!r} have={have!r}")
+    if bad:
+        raise ConfigError("promote verify failed: " + "; ".join(bad[:8]))
+
+
+def _clear_paper_bleed_circuit(state: dict, *, ts: str | None = None) -> None:
+    """New book may trade; old losing closes must not re-arm the halt."""
+    state["paper_bleed_halt"] = False
+    state.pop("paper_bleed_halt_at", None)
+    state.pop("paper_bleed_pnl", None)
+    state["paper_bleed_window_start"] = ts or _utc_now().isoformat()
+    state["deployed_book"] = {
+        "strategy": os.environ.get("STRATEGY"),
+        "timeframe": os.environ.get("TIMEFRAME"),
+        "leverage": os.environ.get("LEVERAGE"),
+        "at": state["paper_bleed_window_start"],
+    }
+
+
 def _patch_env(updates: dict) -> None:
     """Update only allow-listed knobs in .env. Never touches live/API keys."""
     clean = {k: v for k, v in updates.items() if k in _SAFE_ENV_KEYS}
@@ -443,6 +523,7 @@ def _patch_env(updates: dict) -> None:
     ENV_PATH.write_text("\n".join(out) + "\n")
     for key, val in clean.items():
         os.environ[key] = str(val)
+    _verify_env_updates(clean)
 
 
 def _cfg_to_knobs(cfg: Config) -> dict:

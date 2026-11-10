@@ -1,26 +1,28 @@
 ---
-description: Never claim fixed/applied without verifying Live state, env, and UI data path
+description: Never claim fixed/applied without verifying Live state, env, paper process, and P&L
 alwaysApply: true
 ---
 
 # Verify before claiming fixed
 
-Never tell the user something is fixed, applied, improved, or "done" until it is checked in the place they actually look.
+Never tell the user something is fixed, applied, improved, profitable, or "done" until it is checked where they look **and** on the money path.
 
 ## Required before "fixed" / "applied" / "working now"
 
 1. Read the live state the UI reads (not only the code you edited).
-2. Confirm `.env` / config matches the intended book when a promote/apply was claimed.
-3. Confirm the metric on Live (or the relevant screen) matches — e.g. week $ / % — with a real read, not an assumption.
-4. If a restart was required, re-read state after restart; do not trust pre-restart values.
-5. If history, elite, or pending state was touched, confirm it was not wiped or clobbered.
+2. Confirm `.env` matches the intended book (`STRATEGY` / `TIMEFRAME` / `LEVERAGE`).
+3. Confirm the **paper process** is on that same book (environ or Live feed) — `.env` alone is not enough.
+4. Confirm the Live metric they care about (week % / $, DD, last closes) with a real read after restart if one was needed.
+5. If history/elite/pending was touched, confirm it was not wiped.
+6. If hunt "found" a book: prove `.env` + paper book changed; otherwise say **not applied**.
 
 ## Do not
 
-- Announce a hunt find as deployed when only logs show it was found.
-- Soften or rewrite the user's goals (e.g. +100%/week) without explicit ask.
-- Call a code change complete without end-to-end verification of state + UI data path.
+- Announce a hunt find as deployed when only logs/history show it was found.
+- Treat generation count, pulse, or dashboard uptime as proof of profit.
+- Soften or rewrite user goals (e.g. +100%/week) without explicit ask.
+- Call a code change complete without env + paper process + P&L path agreeing.
 
 ## Standard of thoroughness
 
-Check everything that can disagree: code, autopilot state, env, logs, and the dashboard data path. Sloppy partial checks are failures.
+Anything that can disagree must be checked: code, autopilot state, `.env`, paper environ, logs, DB closes, dashboard data path. Partial checks are failures — report the mismatch, do not paper over it.

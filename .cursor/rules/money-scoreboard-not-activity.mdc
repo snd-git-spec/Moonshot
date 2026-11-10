@@ -1,0 +1,39 @@
+---
+description: Paper P&L and deploy fingerprint are the only success metrics — never substitute hunt activity
+alwaysApply: true
+---
+
+# Money scoreboard, not activity
+
+When the user asks if Moonshot is working, improving, profitable, fixed, or "checked," the answer must be grounded in **money and deploy truth**, not search activity.
+
+## The only scoreboard (read these for real)
+
+1. **Paper closes** — last N trade PnLs from the DB (wins/losses/sum). "Every trade losing" is a fail even if hunt is busy.
+2. **Deploy fingerprint** — `.env` `STRATEGY` / `TIMEFRAME` / `LEVERAGE` must match the paper process env and Live book.
+3. **Promote apply** — if history says `improved` / `matrix_escape` / rescue, `.env` must have changed to that book. History-only "found" ≠ deployed.
+4. **Bleed / halt** — if entries are paused, say paused; do not call that a win.
+
+## Mismatch → diagnosis
+
+Compare: champion week · Live week · `.env` book · paper book · last paper closes.
+
+- champion ≫ Live **and** `.env` ≠ champion → **broken apply** (system is not deploying what it found).
+- `.env` = champion **and** Live ≠ paper → **execution divergence** (fill, latency, funding, venue).
+- paper book ≠ `.env` book → **stale paper process** (restart needed).
+- champion ≈ Live ≈ paper **and all flat** → **hunting exhausted for this regime** (reassess; do not call generation climb "progress").
+
+## Forbidden "green" signals (never treat as success alone)
+
+- Generation / search # climbing
+- Dashboard up / pulse fresh / HTTPS OK
+- HOLD messages that sound busy
+- Holdout chart points while Live book is still the loser
+- Log lines that a candidate was "locked" or "ESCAPE" without `.env` change
+- `hunt_exhausted` CRITICAL while narrating "still hunting productively"
+
+## Required honesty
+
+- If paper is red and hunt is HOLDing: say **stuck losing**, not "still hunting."
+- If a better book was found but not in `.env`: say **apply broken**, not "progress."
+- Do not claim "I checked everything" unless the four scoreboard items above were actually read after the latest change.

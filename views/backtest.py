@@ -360,6 +360,7 @@ def _utc_day_end_exclusive(d: date) -> pd.Timestamp:
 
 
 PRESET_DAYS = {
+    "Hunt holdout (14d)": 14,  # same window hunt scores — use book TF
     "Last 7 days": 7,
     "Last 30 days": 30,
     "Last 90 days": 90,
@@ -519,11 +520,11 @@ def _on_split_toggle() -> None:
 today = _today_utc()
 _min_date = date(max(2010, today.year - _YEAR_LOOKBACK), 1, 1)
 
-# One-shot defaults (v4: Custom is back in the Preset dropdown, listed first).
-if st.session_state.get("bt_lab_controls_ready") != 4:
-    st.session_state["bt_lab_preset"] = "Last 30 days"
-    st.session_state["bt_lab_preset_prev"] = "Last 30 days"
-    _prime_custom_from_preset("Last 30 days")
+# One-shot defaults (v5: hunt holdout = the score that matters, not year@coarse TF).
+if st.session_state.get("bt_lab_controls_ready") != 5:
+    st.session_state["bt_lab_preset"] = "Hunt holdout (14d)"
+    st.session_state["bt_lab_preset_prev"] = "Hunt holdout (14d)"
+    _prime_custom_from_preset("Hunt holdout (14d)")
     _seed_ymd("bt_lab_start", st.session_state["bt_lab_start_pending"])
     _seed_ymd("bt_lab_end", st.session_state["bt_lab_end_pending"])
     st.session_state.pop("bt_lab_start_pending", None)
@@ -534,7 +535,8 @@ if st.session_state.get("bt_lab_controls_ready") != 4:
     st.session_state.pop("bt_lab_window_mode", None)
     for stale in ("bt_lab_start", "bt_lab_end", "bt_lab_split"):
         st.session_state.pop(stale, None)
-    st.session_state["bt_lab_controls_ready"] = 4
+    st.session_state["bt_lab_candle_mode"] = f"Book default ({str(cfg0.timeframe).strip().lower()})"
+    st.session_state["bt_lab_controls_ready"] = 5
 
 section_header("Time window", "Complete control — presets or exact dates")
 
@@ -676,6 +678,9 @@ else:
         st.session_state["bt_lab_candle_mode"] = _book_choice
     elif isinstance(_cur, str) and _cur.startswith("Book default") and _cur != _book_choice:
         st.session_state["bt_lab_candle_mode"] = _book_choice
+    # Hunt holdout preset must use the live book TF — never a coarse year replay.
+    if str(st.session_state.get("bt_lab_preset") or "").startswith("Hunt holdout"):
+        st.session_state["bt_lab_candle_mode"] = _book_choice
 
 section_header(
     "Candles",
@@ -755,7 +760,11 @@ if _preview_start is not None and _preview_end is not None:
                 f"(cap {ms.MAX_RANGE_BARS:,}). Shorten the dates or pick a coarser candle."
             )
         elif _run_tf != _book_tf:
-            _tf_note = f"Replaying book logic on {_run_tf} candles (book default is {_book_tf})."
+            _tf_note = (
+                f"Replaying book logic on {_run_tf} candles (book default is {_book_tf}). "
+                f"Hunt scores the last 14d at {_book_tf} toward +100%/holdout — "
+                "a year@coarse TF is not that metric."
+            )
 
     # Cap uses download size (3m is built from 1m on MEXC).
     _ok = 0 < int(_est_fetch) <= ms.MAX_RANGE_BARS

@@ -32,6 +32,8 @@ from moonshot.hunt.constants import (
     HUNT_LEV25_MIN_WEEK_TRADES,
     HUNT_LEV_BREAKOUT,
     HUNT_LEV_POLISH,
+    HUNT_MATRIX_SOFT_CAP,
+    HUNT_MATRIX_TFS,
     HUNT_STRATEGIES,
     HUNT_STUCK_HELD,
     HUNT_TARGETS,
@@ -192,10 +194,15 @@ def _freeze_risk(base: Config, c: Config) -> Config:
 
 
 def knobs_to_cfg(kn: dict, base: Optional[Config] = None) -> Config:
-    """Rebuild a Config from hunt/champion knobs (shared by hunt + Live UI)."""
+    """Rebuild a Config from hunt/champion knobs (shared by hunt + Live UI).
+
+    Uses matrix freeze so strategy/timeframe/leverage from ``kn`` survive —
+    plain ``_freeze_risk`` pinned lev (and non-aggressive strat/TF) to base,
+    which silently turned elite 7×@15m deploys into 10×@5m.
+    """
     base = base or Config.from_env()
     kn = kn or {}
-    return _freeze_risk(
+    return _freeze_risk_matrix(
         base,
         replace(
             base,
@@ -241,9 +248,11 @@ def knobs_to_cfg(kn: dict, base: Optional[Config] = None) -> Config:
             mom_min_atr=float(kn.get("mom_min_atr", base.mom_min_atr)),
             leverage=int(kn.get("leverage", base.leverage)),
             max_account_leverage=float(
-                kn.get("max_account_leverage", base.max_account_leverage)
+                kn.get("max_account_leverage", kn.get("leverage", base.max_account_leverage))
             ),
-            max_net_leverage=float(kn.get("max_net_leverage", base.max_net_leverage)),
+            max_net_leverage=float(
+                kn.get("max_net_leverage", kn.get("leverage", base.max_net_leverage))
+            ),
             max_open_positions=int(kn.get("max_open_positions", base.max_open_positions)),
             h4_ema_fast=int(kn.get("h4_ema_fast", base.h4_ema_fast)),
             h4_ema_slow=int(kn.get("h4_ema_slow", base.h4_ema_slow)),
@@ -270,13 +279,21 @@ def _held_streak(state: dict) -> int:
     return streak
 
 
-# No settle lock — a better week book writes immediately (user wants climb, not wait).
+# Legacy settle lock (0 = off). Non-escape dwell uses RESEARCH_PROMOTE_DWELL_SEC.
 RESEARCH_PROMOTE_MIN_SEC = 0
-# Tiny material floors — any clear edge promotes (rampant improvement).
+# Tiny material floors for in-memory climb; promote hysteresis uses ≥2pp below.
 RESEARCH_MIN_WEEK_EDGE = 0.005
 RESEARCH_MIN_SCORE_EDGE = 1
 RESEARCH_MIN_OOS_RET_EDGE = 0.008
 POST_PROMOTE_HUNT_PAUSE_SEC = 5
+# Product A anti-flap (non-escape research only; escape/rescue bypass).
+RESEARCH_PROMOTE_DWELL_SEC = 24 * 3600
+RESEARCH_HYSTERESIS_WEEK_PP = 0.02
+RESEARCH_HYSTERESIS_PASSES = 2
+RESEARCH_LEV_UP_WEEK_PP = 0.05
+HUNT_EXHAUSTED_GENS = 50
+PAPER_RETIRE_MIN_N = 40
+PAPER_RETIRE_REARM_SEC = 24 * 3600
 # Pending paper entry older than this many bars is dropped (no late fantasy fills).
 PEND_ENTRY_MAX_BARS = 2
 # If paper has not closed a trade for this long, hunt may rotate to a different
@@ -302,6 +319,50 @@ def _paper_idle_hours() -> float:
         return float((pd.Timestamp.now(tz="UTC") - last).total_seconds() / 3600.0)
     except Exception:
         return 0.0
+
+
+def _paper_bleed(n: int | None = None) -> dict:
+    """True when the last N closed paper trades are all losers (live book is dying).
+
+    After a hunt promote clears the circuit, only closes *after* that deploy count
+    — otherwise the old losing streak would re-arm the halt immediately.
+    """
+    from moonshot.hunt.constants import PAPER_BLEED_N, _load_autopilot_state
+
+    need = int(n if n is not None else PAPER_BLEED_N)
+    out = {"bleed": False, "n": 0, "losses": 0, "pnl": 0.0, "need": need}
+    since = None
+    try:
+        st = _load_autopilot_state()
+        since = st.get("paper_bleed_window_start") or None
+    except Exception:
+        since = None
+    try:
+        con = sqlite3.connect(str(DB_PATH))
+        try:
+            if since:
+                rows = con.execute(
+                    "SELECT pnl FROM trades WHERE mode = 'paper' AND ts > ? "
+                    "ORDER BY ts DESC LIMIT ?",
+                    (str(since), need),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT pnl FROM trades WHERE mode = 'paper' ORDER BY ts DESC LIMIT ?",
+                    (need,),
+                ).fetchall()
+        finally:
+            con.close()
+        if not rows:
+            return out
+        pnls = [float(r[0] or 0.0) for r in rows]
+        out["n"] = len(pnls)
+        out["losses"] = sum(1 for p in pnls if p <= 0)
+        out["pnl"] = round(sum(pnls), 2)
+        out["bleed"] = bool(len(pnls) >= need and all(p <= 0 for p in pnls))
+    except Exception:
+        return out
+    return out
 
 
 def _cfg_fingerprint(cfg: Config) -> tuple:
@@ -582,26 +643,66 @@ def _hunt_search_mode(
     has_champion: bool = False,
 ) -> str:
     """
-    Target mix ≈ 70% polish / 20% explore / 10% breakout when a champion exists.
-    Without champion (or when stuck), lean explore then breakout.
+    With champion: ~40% polish / 40% explore / 20% breakout (matrix covers TF×lev).
+    Stuck: prefer breakout so cross-strategy elite seeds actually run.
     """
     if not hunt:
         return "polish"
     stuck = int(held_streak) >= int(HUNT_STUCK_HELD)
-    # ~10% breakout: every 10th generation, or when deeply stuck
-    if stuck and (generation % 5 == 0):
-        return "breakout"
-    if generation % 10 == 0:
-        return "breakout"
-    if has_champion and not stuck:
-        # ~20% explore: one of every five gens (plus ~10% breakout above)
-        if generation % 5 == 1:
-            return "explore"
-        return "polish"
-    # No champion / stuck: explore most of the time
-    if stuck or generation % 4 == 0:
-        return "explore"
+    # Stuck: 60% breakout / 40% explore — polish can't escape a dead family.
+    if stuck:
+        return "breakout" if (int(generation) % 5) in (0, 1, 3) else "explore"
+    if has_champion:
+        mod = int(generation) % 5
+        if mod == 0:
+            return "breakout"  # 20%
+        if mod in (1, 3):
+            return "explore"  # 40%
+        return "polish"  # 40%
     return "explore"
+
+
+def _cfg_dedupe_key(c: Config) -> tuple:
+    return (
+        c.strategy,
+        c.timeframe,
+        c.adx_enter,
+        c.adx_exit,
+        c.volume_multiplier,
+        c.breakout_buffer_atr,
+        c.breakout_lookback,
+        c.trail_atr_multiple,
+        c.trail_atr_loser,
+        round(c.initial_stop_atr, 2),
+        c.cooldown_bars,
+        c.require_rising_adx,
+        c.require_squeeze,
+        c.require_rsi_veto,
+        c.require_btc_regime,
+        c.use_asymmetric_trail,
+        round(c.h4_adx_min_short, 1),
+        c.rsi_long_max,
+        c.rsi_short_min,
+        c.squeeze_lookback,
+        c.enable_partial,
+        c.partial_at_r,
+        c.partial_pct,
+        c.enable_time_stop,
+        c.time_stop_bars,
+        round(c.risk_pct, 3),
+        round(c.initial_margin_pct, 3),
+        int(c.mom_lookback),
+        round(c.mom_min_atr, 3),
+        int(c.leverage),
+        int(c.max_open_positions),
+        round(float(c.max_net_leverage), 2),
+        int(c.h4_ema_fast),
+        int(c.h4_ema_slow),
+        int(c.ema_entry_period),
+        int(c.pullback_lookback),
+        round(float(c.btc_adx_min), 1),
+        round(float(c.breadth_min), 2),
+    )
 
 
 def _dedupe_cfgs(base: Config, seeds: list) -> list:
@@ -609,46 +710,21 @@ def _dedupe_cfgs(base: Config, seeds: list) -> list:
     uniq = []
     for c in seeds:
         c = _freeze_risk(base, c)
-        key = (
-            c.strategy,
-            c.timeframe,
-            c.adx_enter,
-            c.adx_exit,
-            c.volume_multiplier,
-            c.breakout_buffer_atr,
-            c.breakout_lookback,
-            c.trail_atr_multiple,
-            c.trail_atr_loser,
-            round(c.initial_stop_atr, 2),
-            c.cooldown_bars,
-            c.require_rising_adx,
-            c.require_squeeze,
-            c.require_rsi_veto,
-            c.require_btc_regime,
-            c.use_asymmetric_trail,
-            round(c.h4_adx_min_short, 1),
-            c.rsi_long_max,
-            c.rsi_short_min,
-            c.squeeze_lookback,
-            c.enable_partial,
-            c.partial_at_r,
-            c.partial_pct,
-            c.enable_time_stop,
-            c.time_stop_bars,
-            round(c.risk_pct, 3),
-            round(c.initial_margin_pct, 3),
-            int(c.mom_lookback),
-            round(c.mom_min_atr, 3),
-            int(c.leverage),
-            int(c.max_open_positions),
-            round(float(c.max_net_leverage), 2),
-            int(c.h4_ema_fast),
-            int(c.h4_ema_slow),
-            int(c.ema_entry_period),
-            int(c.pullback_lookback),
-            round(float(c.btc_adx_min), 1),
-            round(float(c.breadth_min), 2),
-        )
+        key = _cfg_dedupe_key(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(c)
+    return uniq
+
+
+def _dedupe_cfgs_matrix(base: Config, seeds: list) -> list:
+    """Dedupe while allowing TF×lev from candidates (risk rails still from base)."""
+    seen = set()
+    uniq = []
+    for c in seeds:
+        c = _freeze_risk_matrix(base, c)
+        key = _cfg_dedupe_key(c)
         if key in seen:
             continue
         seen.add(key)
@@ -799,10 +875,14 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     lev = int(rng.choice(lev_opts))
     n_open = int(rng.choice(open_opts))
     strat = str(rng.choice(strat_opts))
-    # Prefer faster clocks so more setups exist per day — never 3m (1m resample).
+    # Prefer faster clocks; wide samples full HUNT_TF_ALLOW under lev×tf matrix.
     tf = _tf_for_leverage(int(lev), str(base.timeframe))
-    if wide and rng.random() < 0.4:
-        tf = str(rng.choice(["5m", "15m"]))
+    if wide and rng.random() < 0.55:
+        tf = str(rng.choice(list(HUNT_TF_ALLOW)))
+        if not _lev_tf_allowed(int(lev), tf):
+            tf = _tf_for_leverage(int(lev), tf)
+    elif (not wide) and rng.random() < 0.25:
+        tf = str(rng.choice(list(HUNT_TF_ALLOW)))
         if not _lev_tf_allowed(int(lev), tf):
             tf = _tf_for_leverage(int(lev), tf)
     return replace(
@@ -932,8 +1012,124 @@ def _lev_density_ok(
     return True
 
 
+def _tf_minutes(tf: str) -> float:
+    """Candle size in minutes for bar-knob scaling."""
+    t = str(tf or "").strip().lower()
+    if t.endswith("m") and t[:-1].isdigit():
+        return float(t[:-1])
+    if t.endswith("h") and t[:-1].isdigit():
+        return float(t[:-1]) * 60.0
+    if t.endswith("d") and t[:-1].isdigit():
+        return float(t[:-1]) * 1440.0
+    return 15.0
+
+
+def _scale_bar_knobs_for_tf(base: Config, new_tf: str) -> Config:
+    """Scale bar-denominated knobs so 5m→1h is closer to like-for-like."""
+    old_m = _tf_minutes(str(base.timeframe))
+    new_m = _tf_minutes(new_tf)
+    if old_m <= 0 or abs(new_m - old_m) < 1e-9:
+        return replace(base, timeframe=str(new_tf).strip().lower())
+    ratio = float(new_m) / float(old_m)
+    # Coarser TF → fewer bars for same wall-clock; finer → more bars.
+    # Scale lookbacks so wall-clock horizon stays roughly constant.
+    def _sc(val: int, lo: int, hi: int) -> int:
+        return int(max(lo, min(hi, round(int(val) / ratio if ratio >= 1 else int(val) * (1.0 / ratio)))))
+
+    # When going 5m → 1h, ratio=12: same wall-clock needs FEWER bars → divide.
+    # When going 1h → 5m, ratio=1/12: need MORE bars → multiply via 1/ratio branch above.
+    if ratio >= 1.0:
+        # coarser: divide bar counts
+        mom = int(max(3, min(24, round(int(base.mom_lookback) / ratio))))
+        cool = int(max(0, min(12, round(int(base.cooldown_bars) / ratio))))
+        bo = int(max(8, min(48, round(int(base.breakout_lookback) / ratio))))
+        ts = int(max(4, min(48, round(int(base.time_stop_bars) / ratio))))
+        sq = int(max(4, min(24, round(int(base.squeeze_lookback) / ratio))))
+        pb = int(max(2, min(12, round(int(base.pullback_lookback) / ratio))))
+    else:
+        inv = 1.0 / ratio
+        mom = int(max(3, min(24, round(int(base.mom_lookback) * inv))))
+        cool = int(max(0, min(12, round(int(base.cooldown_bars) * inv))))
+        bo = int(max(8, min(48, round(int(base.breakout_lookback) * inv))))
+        ts = int(max(4, min(48, round(int(base.time_stop_bars) * inv))))
+        sq = int(max(4, min(24, round(int(base.squeeze_lookback) * inv))))
+        pb = int(max(2, min(12, round(int(base.pullback_lookback) * inv))))
+    return replace(
+        base,
+        timeframe=str(new_tf).strip().lower(),
+        mom_lookback=mom,
+        cooldown_bars=cool,
+        breakout_lookback=bo,
+        time_stop_bars=ts,
+        squeeze_lookback=sq,
+        pullback_lookback=pb,
+    )
+
+
+def _freeze_risk_matrix(base: Config, c: Config) -> Config:
+    """Like `_freeze_risk` but allows strategy + TF + leverage from the candidate.
+
+    Kill rails / risk_pct / daily / peak DD stay pinned to ``base``.
+    Plain ``_freeze_risk`` pins strat/TF/lev to Live when aggressive_mode is off —
+    that silently turned champion rescue into a no-op. Matrix freeze restores the
+    tradable identity (S/T/L) from ``c``.
+    """
+    # Start from A.1 freeze (pins lev/strat when non-aggressive), then restore
+    # candidate strategy + TF + lev so rescue/elite/pending deploy the real book.
+    pinned = _freeze_risk(base, c)
+    strat = str(getattr(c, "strategy", base.strategy) or base.strategy).strip().lower()
+    if strat not in HUNT_STRATEGIES and strat not in (
+        "momentum_rule",
+        "combo_and",
+        "regime_breakout",
+    ):
+        strat = (base.strategy or "trend_mtf").strip().lower()
+    tf = str(getattr(c, "timeframe", base.timeframe) or base.timeframe).strip().lower()
+    if tf not in HUNT_TF_ALLOW:
+        tf = str(base.timeframe) if str(base.timeframe) in HUNT_TF_ALLOW else "15m"
+    lev = int(getattr(c, "leverage", base.leverage) or base.leverage)
+    if not _lev_tf_allowed(lev, tf):
+        # Snap to nearest allowed lev at this TF
+        for cand_lev in (5, 7, 10, 15, 25):
+            if _lev_tf_allowed(cand_lev, tf):
+                lev = cand_lev
+                break
+    return replace(
+        pinned,
+        strategy=strat,
+        leverage=int(lev),
+        timeframe=tf,
+        max_account_leverage=float(lev),
+        max_net_leverage=float(lev),
+        risk_pct=float(base.risk_pct),
+        max_daily_loss_pct=float(base.max_daily_loss_pct),
+        max_peak_drawdown_pct=float(base.max_peak_drawdown_pct),
+    )
+
+
+def _tf_lev_matrix_cfgs(base: Config) -> list:
+    """Full like-for-like TF×lev grid (~15 cells) with bar knobs scaled per TF."""
+    seeds = []
+    for tf in HUNT_MATRIX_TFS:
+        tf = str(tf).strip().lower()
+        scaled = _scale_bar_knobs_for_tf(base, tf)
+        for lev in (5, 7, 10, 15, 25):
+            if not _lev_tf_allowed(int(lev), tf):
+                continue
+            seeds.append(
+                replace(
+                    scaled,
+                    leverage=int(lev),
+                    timeframe=tf,
+                    max_account_leverage=float(lev),
+                    max_net_leverage=float(lev),
+                )
+            )
+    return seeds
+
+
 def _leverage_ladder_cfgs(base: Config) -> list:
-    """Fixed lev×TF matrix clones of the current book (not a free rainbow)."""
+    """Legacy book-TF ladder (+ 5m high-lev probes). Prefer `_tf_lev_matrix_cfgs`."""
     seeds = []
     bt = str(base.timeframe or "15m").strip().lower()
     if bt not in HUNT_TF_ALLOW:
@@ -967,15 +1163,168 @@ def _leverage_ladder_cfgs(base: Config) -> list:
     return seeds
 
 
+def _holdout_span_ok(days: float, *, min_days: float | None = None) -> bool:
+    """True if holdout calendar span is long enough to score."""
+    need = float(WEEK_DAYS - 1) if min_days is None else float(min_days)
+    try:
+        return float(days) + 1e-9 >= need
+    except (TypeError, ValueError):
+        return False
+
+
+def _rank_matrix_rows(rows: list[dict] | None) -> dict | None:
+    """Best robust, non-skipped row by holdout week_ret."""
+    best = None
+    best_w = -999.0
+    for row in rows or []:
+        if not row or row.get("skip") or not row.get("robust_ok"):
+            continue
+        try:
+            # Do not use `or -999` — week_ret 0.0 is a valid flat week.
+            raw = row.get("week_ret")
+            wr = float(raw) if raw is not None else -999.0
+        except (TypeError, ValueError):
+            continue
+        if wr > best_w + 1e-12:
+            best_w = wr
+            best = row
+    return best
+
+
+def _rank_matrix_rows_escape(
+    rows: list[dict] | None, *, base_week_ret: float
+) -> dict | None:
+    """When no robust cell exists and Live is red, pick the least-bad matrix week.
+
+    Requires the cell week to beat the deployed book by ≥2pp (or be green while
+    base is red). Robust_ok is NOT required — that gate was freezing Live on a
+    death TF×lev while 4h sat at +1%.
+    """
+    best = None
+    best_w = -999.0
+    base_w = float(base_week_ret)
+    for row in rows or []:
+        if not row or row.get("skip"):
+            continue
+        try:
+            raw = row.get("week_ret")
+            wr = float(raw) if raw is not None else -999.0
+        except (TypeError, ValueError):
+            continue
+        beats = wr >= base_w + 0.02
+        green_escape = base_w < 0.0 and wr > 0.0
+        if not (beats or green_escape):
+            continue
+        if wr > best_w + 1e-12:
+            best_w = wr
+            best = row
+    return best
+
+
+def _best_by_tf_raise(
+    state: dict,
+    *,
+    tf: str,
+    knobs: dict,
+    week_ret: float,
+    oos_ret: float,
+    generation: int,
+    ts: str,
+    prior_ret: float | None = None,
+) -> None:
+    """Raise-only per-TF memory."""
+    tf = str(tf).strip().lower()
+    mem = state.setdefault("best_by_tf", {})
+    if not isinstance(mem, dict):
+        mem = {}
+        state["best_by_tf"] = mem
+    prev = mem.get(tf) if isinstance(mem.get(tf), dict) else None
+    old_w = float((prev or {}).get("week_ret") or -999)
+    new_w = float(week_ret)
+    if prev and new_w < old_w - 0.0005:
+        return
+    blob = {
+        "ts": ts,
+        "generation": generation,
+        "week_ret": new_w,
+        "oos_ret": float(oos_ret),
+        "knobs": knobs,
+    }
+    if prior_ret is not None:
+        blob["prior_ret"] = float(prior_ret)
+    mem[tf] = blob
+
+
+def _best_by_tf_seed_ok(
+    blob: dict | None,
+    *,
+    prior_ret: float | None = None,
+    oos_ret: float | None = None,
+    soft_ret: float | None = None,
+) -> bool:
+    """Revalidate stored best_by_tf before injecting as a polish seed."""
+    if not isinstance(blob, dict) or not blob.get("knobs"):
+        return False
+    pr = prior_ret if prior_ret is not None else blob.get("prior_ret")
+    oos = oos_ret if oos_ret is not None else blob.get("oos_ret")
+    if oos is None:
+        return False
+    week = {"prior_ret": pr, "ret": blob.get("week_ret")}
+    if pr is None:
+        return False
+    soft = soft_ret if soft_ret is not None else blob.get("soft_ret")
+    ok, _ = _period_robust_ok(week, float(oos), float(soft) if soft is not None else float(oos))
+    return bool(ok)
+
+
+def _select_polish_base(
+    *,
+    live_base: Config,
+    matrix_winner_cfg: Config | None,
+    best_by_tf_cfg: Config | None,
+    champion_cfg: Config | None,
+) -> Config:
+    """Precedence: robust matrix winner > best_by_tf > champion > Live."""
+    if matrix_winner_cfg is not None:
+        return matrix_winner_cfg
+    if best_by_tf_cfg is not None:
+        return best_by_tf_cfg
+    if champion_cfg is not None:
+        return champion_cfg
+    return live_base
+
+
+def _run_tf_lev_matrix_from_rows(
+    rows: list[dict],
+    *,
+    live_base: Config,
+    cell_cfgs: dict[tuple[str, int], Config],
+) -> tuple[Config | None, dict | None]:
+    """Pick polish cfg from precomputed matrix rows (testable without network)."""
+    winner = _rank_matrix_rows(rows)
+    if not winner:
+        return None, None
+    key = (str(winner.get("tf")), int(winner.get("leverage") or 0))
+    cfg = cell_cfgs.get(key)
+    if cfg is None:
+        return None, winner
+    return cfg, winner
+
+
 def _candidate_cfgs(
-    base: Config, generation: int = 0, hunt: bool = True, search_mode: str = "polish"
+    base: Config,
+    generation: int = 0,
+    hunt: bool = True,
+    search_mode: str = "polish",
+    *,
+    allow_lev_tf: bool = False,
 ) -> list:
     """
     polish: nudges around current best.
     explore: wider random + local ring.
     breakout: large jumps across filters/exits when held forever.
 
-    Leverage bake-off runs once after soft-check (not duplicated into this list).
+    When allow_lev_tf=True (matrix hunt), dedupe uses `_freeze_risk_matrix`.
     """
     mode = (search_mode or "polish").strip().lower()
     if not hunt:
@@ -986,7 +1335,8 @@ def _candidate_cfgs(
         seeds = _explore_cfgs(base, generation)
     else:
         seeds = _polish_cfgs(base)
-    return _dedupe_cfgs(base, seeds)
+    dedupe = _dedupe_cfgs_matrix if allow_lev_tf else _dedupe_cfgs
+    return dedupe(base, seeds)
 
 
 def _feature_cache_key(cfg: Config) -> tuple:
@@ -1312,6 +1662,46 @@ def _dual_week_ok(week: dict | None) -> bool:
     if primary >= week_tgt and prior >= 0.0:
         return True
     return primary >= hard_floor and prior >= hard_floor
+
+
+def _period_robust_ok(
+    week: dict | None,
+    oos_ret: float,
+    soft_ret: float | None = None,
+) -> tuple[bool, str]:
+    """Hard period floors: recent week alone must not crown a multi-window loser.
+
+    When require_period_robust: long OOS, prior 14d, and soft OOS must clear floors
+    (default 0 — no red periods). Year@coarse backtests can still look ugly; this
+    stops hunt from calling a one-window spike "best".
+    """
+    if not HUNT_TARGETS.get("require_period_robust", True):
+        return True, "robust_off"
+    try:
+        oos = float(oos_ret)
+    except (TypeError, ValueError):
+        return False, "oos_missing"
+    oos_floor = float(HUNT_TARGETS.get("oos_floor", 0.0))
+    if oos < oos_floor:
+        return False, f"oos {oos:+.0%} < floor {oos_floor:+.0%}"
+    if week is None or week.get("prior_ret") is None:
+        return False, "prior_week_missing"
+    try:
+        prior = float(week.get("prior_ret"))
+    except (TypeError, ValueError):
+        return False, "prior_week_bad"
+    prior_floor = float(HUNT_TARGETS.get("prior_week_floor", 0.0))
+    if prior < prior_floor:
+        return False, f"prior {prior:+.0%} < floor {prior_floor:+.0%}"
+    if soft_ret is not None:
+        try:
+            soft = float(soft_ret)
+        except (TypeError, ValueError):
+            return False, "soft_missing"
+        soft_floor = float(HUNT_TARGETS.get("soft_promote_floor", 0.0))
+        if soft < soft_floor:
+            return False, f"soft {soft:+.0%} < floor {soft_floor:+.0%}"
+    return True, "period_robust"
 
 
 def _forward_record(symbols: list, since_iso: str) -> dict:

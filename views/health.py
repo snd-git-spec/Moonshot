@@ -73,6 +73,14 @@ _live_week_ret = float(
     _live_week.get("ret") if _live_week.get("ret") is not None
     else (_grade.get("week_return") or 0)
 )
+_wd = _ap.get("scoreboard_watchdog") or {}
+if _wd.get("critical"):
+    _alerts = _wd.get("alerts") or ["champ / .env mismatch"]
+    st.error(
+        "**SCOREBOARD CRITICAL** — Live may be stranded below champion.  \n"
+        + "  \n".join(f"- {a}" for a in _alerts[:4])
+    )
+
 st.info(
     f"**Live climb** (what overnight hunt optimizes): score {_live_score}/100 · "
     f"7-day history {_live_week_ret:+.0%} · long OOS {_live_ret:+.0%} · "

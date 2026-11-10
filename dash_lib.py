@@ -39,6 +39,7 @@ LIVE_FEED_PATH = Path(__file__).resolve().parent / ".moonshot_live.jsonl"
 CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&family=Syne:wght@600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
 
 /* ---- exchange-terminal shell ---- */
 html, body, [class*="css"], .stApp, .stMarkdown, .stText, label {
@@ -78,16 +79,46 @@ a[data-testid="stTopNavLink"][aria-current="page"] {
   border-bottom-color: #F0B90B !important;
 }
 a[data-testid="stTopNavLink"] p { margin: 0 !important; color: inherit !important; }
+/* Material icon glyphs (Streamlit sidebar expand) — without this font the ligature name shows as text */
+[data-testid="stIconMaterial"] {
+  font-family: 'Material Icons' !important;
+  font-weight: normal !important;
+  font-style: normal !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+  letter-spacing: normal !important;
+  text-transform: none !important;
+  display: inline-block !important;
+  white-space: nowrap !important;
+  direction: ltr !important;
+  -webkit-font-feature-settings: 'liga' !important;
+  -webkit-font-smoothing: antialiased !important;
+  color: #EAECEF !important;
+}
+button[data-testid="stExpandSidebarButton"] {
+  min-width: 2rem !important;
+  height: 2rem !important;
+  padding: 0 !important;
+  margin-right: 0.35rem !important;
+  border: 1px solid #1E2329 !important;
+  border-radius: 4px !important;
+  background: #12161C !important;
+}
+button[data-testid="stExpandSidebarButton"]:hover {
+  border-color: #F0B90B !important;
+  color: #F0B90B !important;
+}
 /* Desktop: hide empty sidebar (nav is in the header). Mobile keeps sidebar nav. */
 @media (min-width: 768px) {
   [data-testid="stSidebar"],
   section[data-testid="stSidebar"],
-  [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+  [data-testid="stSidebarCollapsedControl"],
+  button[data-testid="stExpandSidebarButton"] { display: none !important; }
 }
 [data-testid="stDecoration"],
 #MainMenu, footer { display: none !important; }
 .block-container {
-  padding: 0.35rem 1.1rem 1.5rem 1.1rem !important;
+  padding: 0.15rem 1.1rem 1.5rem 1.1rem !important;
   max-width: 1400px !important;
 }
 /* Tighter vertical rhythm between Streamlit blocks */
@@ -139,21 +170,56 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
   .ms-split { grid-template-columns: 1fr; }
 }
 
-/* Thin status strip under native nav */
+/* Exchange-style ticker — glued under header, full viewport width */
 .ms-status {
-  display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap;
-  width: calc(100% + 2.5rem); margin: 0 -1.25rem 0.65rem -1.25rem;
-  padding: 0.35rem 1.25rem; box-sizing: border-box;
-  background: #12161C; border-bottom: 1px solid #1E2329;
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  width: 100vw;
+  max-width: 100vw;
+  z-index: 999990;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem 1.25rem; flex-wrap: nowrap;
+  margin: 0;
+  padding: 0.45rem 1.35rem;
+  box-sizing: border-box;
+  background: #12161C;
+  border-bottom: 1px solid #1E2329;
+  border-top: 1px solid #1E2329;
   font-family: 'IBM Plex Mono', ui-monospace, monospace;
-  font-size: 0.75rem; color: #848E9C;
+  font-size: 0.72rem; color: #848E9C;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
+.ms-status-spacer {
+  height: 2.55rem;
+  width: 100%;
+  flex-shrink: 0;
+  margin: 0 0 0.35rem 0;
+}
+.ms-status-group {
+  display: flex; align-items: center; gap: 0.95rem; flex-wrap: nowrap; min-width: 0;
+}
+.ms-status-group.grow { flex: 1 1 auto; justify-content: center; }
+.ms-status-item { white-space: nowrap; }
+.ms-status-item .lbl { color: #5E6673; margin-right: 0.28rem; font-weight: 500; }
 .ms-status b { color: #EAECEF; font-weight: 600; }
 .ms-status .up { color: #0ECB81; }
 .ms-status .down { color: #F6465D; }
+.ms-status .warn { color: #F0B90B; }
 .ms-status .mode {
-  color: #F0B90B; font-weight: 600; letter-spacing: 0.04em;
+  color: #F0B90B; font-weight: 700; letter-spacing: 0.06em;
 }
+.ms-status .badge {
+  display: inline-block; padding: 0.08rem 0.4rem; border-radius: 3px;
+  border: 1px solid #F0B90B55; color: #F0B90B; font-weight: 700;
+  letter-spacing: 0.04em; font-size: 0.65rem;
+}
+.ms-status .badge.frozen { border-color: #848E9C66; color: #EAECEF; background: #1E2329; }
+.ms-status .badge.halt { border-color: #F6465D66; color: #F6465D; background: #F6465D12; }
+.ms-status .sep { color: #2B3139; user-select: none; }
+/* Mobile status rules live in the shared @media (max-width: 900px) block below */
 
 h1, h2, h3 { letter-spacing: -0.02em !important; font-weight: 600 !important; }
 div[data-testid="stMetric"] {
@@ -234,15 +300,21 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
 .ms-stat.good .ms-stat-value { color: #0ECB81; }
 .ms-stat.bad .ms-stat-value { color: #F6465D; }
 .ms-section {
-  display: flex; align-items: baseline; justify-content: space-between;
-  gap: 1rem; margin: 0.7rem 0 0.4rem 0;
-  border-bottom: 1px solid #1E2329; padding-bottom: 0.3rem;
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: 0.2rem; margin: 1.1rem 0 0.55rem 0;
+  border-bottom: 1px solid #1E2329; padding-bottom: 0.45rem;
 }
 .ms-section h3 {
   margin: 0 !important; font-size: 0.95rem !important; font-weight: 600 !important;
-  color: #EAECEF !important;
+  color: #EAECEF !important; line-height: 1.25 !important;
 }
-.ms-section span { color: #848E9C; font-size: 0.8rem; }
+.ms-section span {
+  color: #848E9C; font-size: 0.78rem; line-height: 1.4;
+  max-width: 52rem; display: block;
+}
+/* Keep Plotly charts from colliding with captions below */
+div[data-testid="stPlotlyChart"] { margin-bottom: 0.35rem !important; }
+div[data-testid="stCaption"] { margin-top: 0.15rem !important; margin-bottom: 0.65rem !important; }
 .ms-goal {
   display: grid; grid-template-columns: 1.4fr 2fr auto; gap: 0.65rem; align-items: center;
   padding: 0.55rem 0.7rem; border: 1px solid #1E2329; border-radius: 6px;
@@ -314,6 +386,95 @@ div[data-testid="stExpander"] {
   font-weight: 500 !important;
 }
 .stButton > button:hover { border-color: #F0B90B !important; color: #F0B90B !important; }
+
+/* ---- mobile / narrow screens ---- */
+@media (max-width: 900px) {
+  /* Keep ticker as one scrollable strip — wrapping ate half the screen */
+  .ms-status {
+    top: 48px;
+    flex-wrap: nowrap !important;
+    gap: 0.85rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.68rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ms-status::-webkit-scrollbar { display: none; }
+  .ms-status-group { flex-wrap: nowrap !important; gap: 0.85rem; flex: 0 0 auto; }
+  .ms-status-group.grow { justify-content: flex-start !important; flex: 0 0 auto; }
+  .ms-status-item .lbl { margin-right: 0.2rem; }
+  .ms-status .sep { margin: 0 0.15rem; }
+  .ms-status-spacer { height: 2.4rem !important; margin-bottom: 0.2rem !important; }
+
+  .block-container {
+    padding: 0.1rem 0.7rem 1.1rem 0.7rem !important;
+    max-width: 100% !important;
+  }
+  a[data-testid="stTopNavLink"] {
+    padding: 0 0.55rem !important;
+    font-size: 0.82rem !important;
+  }
+  .ms-hero {
+    padding: 0.75rem 0.8rem 0.8rem;
+    margin-bottom: 0.55rem;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .ms-hero-headline { font-size: 1.02rem; }
+  .ms-hero-detail { font-size: 0.8rem; }
+  .ms-stat { padding: 0.55rem 0.6rem; }
+  .ms-stat-value { font-size: 1.1rem; }
+  .ms-stat-hint { font-size: 0.68rem; line-height: 1.3; }
+  .ms-section { margin: 0.85rem 0 0.4rem 0; padding-bottom: 0.35rem; }
+  .ms-section h3 { font-size: 0.9rem !important; }
+  .ms-section span { font-size: 0.72rem; }
+  .ms-page-title { font-size: 1.0rem; }
+  .ms-page-sub { font-size: 0.76rem; margin-bottom: 0.4rem; }
+  .ms-home-brand { font-size: clamp(2rem, 10vw, 2.8rem); }
+  .ms-home-lead { font-size: 0.95rem; }
+  .ms-strip { gap: 0.3rem; margin-bottom: 0.55rem; }
+  .ms-chip { font-size: 0.7rem; margin-right: 0; }
+
+  /* Tables / dataframes: allow sideways scroll instead of crushing columns */
+  div[data-testid="stDataFrame"],
+  div[data-testid="stDataFrameResizable"] {
+    overflow-x: auto !important;
+    max-width: 100% !important;
+  }
+
+  /* Plotly: slightly less chrome on small screens */
+  div[data-testid="stPlotlyChart"] .modebar {
+    top: 0 !important; right: 0 !important;
+    transform: scale(0.85);
+    transform-origin: top right;
+  }
+}
+@media (max-width: 560px) {
+  .block-container {
+    padding: 0.05rem 0.55rem 0.9rem 0.55rem !important;
+  }
+  .ms-status { padding: 0.35rem 0.55rem; font-size: 0.64rem; gap: 0.65rem; }
+  .ms-status-spacer { height: 2.25rem !important; }
+  .ms-stat-grid,
+  .ms-stat-grid.cols-5,
+  .ms-stat-grid.cols-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 0.4rem;
+    margin-top: 0.55rem;
+  }
+  .ms-stat-label { font-size: 0.6rem; letter-spacing: 0.05em; }
+  .ms-stat-value { font-size: 1.0rem; }
+  .ms-stat-hint { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ms-section span { -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .ms-hero-detail { -webkit-line-clamp: 3; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  /* Hide Plotly toolbar on phones — pinch/drag still work via chart */
+  div[data-testid="stPlotlyChart"] .modebar { display: none !important; }
+  div[data-testid="stCaption"] { font-size: 0.72rem !important; line-height: 1.35 !important; }
+  /* Sidebar page list denser */
+  [data-testid="stSidebarNav"] a { padding: 0.55rem 0.75rem !important; }
+}
 </style>
 """
 
@@ -329,20 +490,173 @@ def page_setup(title: str = "") -> None:
         pass
 
 
+def _status_item(label: str, value_html: str) -> str:
+    return (
+        f'<span class="ms-status-item">'
+        f'<span class="lbl">{label}</span>{value_html}</span>'
+    )
+
+
 def topbar(balance: Optional[float] = None, score: Optional[int] = None,
            mode: str = "PAPER", active: Optional[str] = None) -> None:
-    """Thin status strip under native top nav (balance / score / mode)."""
+    """Exchange-style ticker under native top nav — fills the strip with live book stats."""
     _ = active  # page highlight is handled by st.navigation(position="top")
-    bits = [f'<span class="mode">{mode}</span>']
-    if balance is not None:
-        cls = "up" if balance >= 50 else "down"
-        bits.append(f'<span>Bal <b class="{cls}">${balance:,.2f}</b></span>')
+
+    eq = load_equity(None)
+    det = detect_mode(eq) if not eq.empty else "paper"
+    mode_label = (mode or det or "paper").upper()
+    eq_m = load_equity(det) if not eq.empty else eq
+    if eq_m.empty:
+        eq_m = eq
+
+    bal = balance
+    peak = None
+    dd = None
+    day_pnl = None
+    if not eq_m.empty:
+        last = eq_m.iloc[-1]
+        if bal is None:
+            try:
+                bal = float(last["equity"])
+            except (TypeError, ValueError, KeyError):
+                bal = None
+        try:
+            peak = float(last["peak"]) if last.get("peak") is not None else None
+        except (TypeError, ValueError, KeyError):
+            peak = None
+        try:
+            dd = float(last["drawdown"]) if last.get("drawdown") is not None else None
+        except (TypeError, ValueError, KeyError):
+            dd = None
+        if dd is None and peak and bal is not None and peak > 0:
+            dd = max(0.0, (peak - bal) / peak)
+        # Day P&L vs first equity print of UTC day
+        try:
+            now = pd.Timestamp.now(tz="UTC")
+            day0 = now.normalize()
+            day_slice = eq_m[eq_m["ts"] >= day0]
+            if not day_slice.empty and bal is not None:
+                day_pnl = float(bal) - float(day_slice.iloc[0]["equity"])
+        except Exception:
+            day_pnl = None
+
+    risk = load_risk(det) or load_risk(None)
+    kill = bool(risk.get("kill")) if risk else False
+    daily_halt = bool(risk.get("daily_halt")) if risk else False
+    halt_reason = str(risk.get("halt_reason") or "").strip() if risk else ""
+    streak = None
+    if risk and risk.get("streak") is not None:
+        try:
+            streak = int(risk["streak"])
+        except (TypeError, ValueError):
+            streak = None
+
+    positions = load_positions()
+    n_open = len(positions)
+
+    trades = load_trades(det)
+    if trades.empty:
+        trades = load_trades(None)
+    n_trades = int(len(trades)) if not trades.empty else 0
+
+    state = load_autopilot_state() or {}
+    grade = state.get("grade") or {}
+    week = grade.get("week") or {}
+    if score is None:
+        try:
+            score = int(grade.get("score") or 0)
+        except (TypeError, ValueError):
+            score = None
+    week_ret = None
+    try:
+        if week.get("ret") is not None:
+            week_ret = float(week["ret"])
+    except (TypeError, ValueError):
+        week_ret = None
+
+    # Live book from env (what paper actually runs)
+    book = ""
+    try:
+        cfg = ms.Config.from_env()
+        book = f"{int(cfg.leverage)}×@{cfg.timeframe} {cfg.strategy}"
+    except Exception:
+        book = ""
+
+    frozen = False
+    try:
+        from dotenv import load_dotenv as _ld
+
+        from moonshot.hunt.constants import ENV_PATH, autopilot_frozen
+
+        # Streamlit keeps process env from boot — re-read .env so FROZEN clears live.
+        _ld(ENV_PATH, override=True)
+        frozen = bool(autopilot_frozen())
+    except Exception:
+        frozen = False
+
+    hist = state.get("history") or []
+    pass_n = len(hist) if isinstance(hist, list) else 0
+    busy = bool(state.get("busy"))
+    age = heartbeat_age(eq_m)
+
+    # ---- left: mode badges ----
+    left: list[str] = [f'<span class="mode">{mode_label}</span>']
+    if frozen:
+        left.append('<span class="badge frozen">FROZEN</span>')
+    if kill or daily_halt or halt_reason:
+        left.append('<span class="badge halt">HALTED</span>')
+
+    # ---- center: money / risk / activity ----
+    mid: list[str] = []
+    if bal is not None:
+        # vs $1000 start when possible
+        start_eq = 1000.0
+        try:
+            start_eq = float(ms.Config.from_env().starting_equity) or 1000.0
+        except Exception:
+            pass
+        cls = "up" if bal >= start_eq else "down"
+        mid.append(_status_item("Bal", f'<b class="{cls}">${bal:,.2f}</b>'))
+    if day_pnl is not None:
+        cls = "up" if day_pnl >= 0 else "down"
+        sign = "+" if day_pnl >= 0 else ""
+        mid.append(_status_item("Day", f'<b class="{cls}">{sign}${day_pnl:,.2f}</b>'))
+    if dd is not None:
+        cls = "down" if dd > 0.05 else ("warn" if dd > 0.02 else "")
+        mid.append(_status_item("DD", f'<b class="{cls}">{dd:.1%}</b>'))
+    mid.append(_status_item("Open", f"<b>{n_open}</b>"))
+    mid.append(_status_item("Closed", f"<b>{n_trades}</b>"))
+    if week_ret is not None:
+        cls = "up" if week_ret >= 0 else "down"
+        mid.append(_status_item("Holdout", f'<b class="{cls}">{week_ret:+.0%}</b>'))
+    if streak is not None and streak != 0:
+        cls = "down" if streak < 0 else ""
+        mid.append(_status_item("Streak", f'<b class="{cls}">{streak:+d}</b>'))
+
+    # ---- right: book / score / hunt / pulse ----
+    right: list[str] = []
+    if book:
+        right.append(_status_item("Book", f"<b>{book}</b>"))
     if score is not None:
-        bits.append(f'<span>Score <b>{int(score)}/100</b></span>')
-    st.markdown(
-        f'<div class="ms-status">{"".join(bits)}</div>',
-        unsafe_allow_html=True,
+        right.append(_status_item("Score", f"<b>{int(score)}/100</b>"))
+    if pass_n:
+        hunt_lbl = "Hunting…" if busy else f"#{pass_n}"
+        right.append(_status_item("Hunt", f"<b>{hunt_lbl}</b>"))
+    hb = format_age(age)
+    hb_cls = "up" if heartbeat_kind(age) == "ok" else ("warn" if heartbeat_kind(age) == "muted" else "down")
+    right.append(_status_item("Pulse", f'<b class="{hb_cls}">{hb}</b>'))
+
+    mid_html = '<span class="sep"> · </span>'.join(mid)
+    right_html = '<span class="sep"> · </span>'.join(right)
+    html = (
+        '<div class="ms-status">'
+        f'<div class="ms-status-group">{" ".join(left)}</div>'
+        f'<div class="ms-status-group grow">{mid_html}</div>'
+        f'<div class="ms-status-group">{right_html}</div>'
+        "</div>"
+        '<div class="ms-status-spacer" aria-hidden="true"></div>'
     )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def page_header(kicker: str, title: str, subtitle: str = "") -> None:
@@ -702,9 +1016,31 @@ PLOTLY_CONFIG: dict = {
 }
 
 
+def is_mobile() -> bool:
+    """Best-effort phone/tablet detect from the request User-Agent."""
+    try:
+        ua = str(st.context.headers.get("User-Agent") or "").lower()
+    except Exception:
+        ua = ""
+    return any(
+        token in ua
+        for token in ("iphone", "ipod", "android", "mobile", "ipad", "opera mini")
+    )
+
+
+def chart_height(desktop: int, mobile: int | None = None) -> int:
+    """Pick a chart height that fits the current viewport class."""
+    if is_mobile():
+        return int(mobile if mobile is not None else max(220, int(desktop * 0.7)))
+    return int(desktop)
+
+
 def plotly_kwargs(**extra) -> dict:
     """Canonical st.plotly_chart kwargs."""
     cfg = dict(PLOTLY_CONFIG)
+    if is_mobile():
+        cfg["displayModeBar"] = False
+        cfg["scrollZoom"] = False  # avoid hijacking page scroll on phones
     user_cfg = extra.pop("config", None)
     if isinstance(user_cfg, dict):
         cfg.update(user_cfg)
@@ -726,8 +1062,47 @@ def polish_fig(fig: go.Figure) -> go.Figure:
     return fig
 
 
+def fit_fig_for_viewport(fig: go.Figure) -> go.Figure:
+    """Shrink chart chrome on phones so axis labels still fit."""
+    if not is_mobile():
+        return fig
+    try:
+        h = int(fig.layout.height or 360)
+    except Exception:
+        h = 360
+    h = max(220, min(h, int(h * 0.72)))
+    m = fig.layout.margin
+    left = int(getattr(m, "l", None) or 48)
+    right = int(getattr(m, "r", None) or 16)
+    top = int(getattr(m, "t", None) or 16)
+    bottom = int(getattr(m, "b", None) or 48)
+    fig.update_layout(
+        height=h,
+        margin=dict(
+            # Keep enough left room for 4-digit $ ticks; shrinking below ~52
+            # made rotated axis titles overlap numbers on equity charts.
+            l=max(52, left - 8),
+            r=max(8, right - 6),
+            t=max(6, top - 6),
+            b=max(44, bottom - 4),
+        ),
+        font=dict(size=11),
+    )
+    try:
+        fig.update_xaxes(nticks=4, tickfont=dict(size=10))
+        fig.update_yaxes(tickfont=dict(size=10), title=None)
+    except Exception:
+        pass
+    return fig
+
+
 def show_plotly(fig: go.Figure, **extra) -> None:
-    st.plotly_chart(polish_fig(fig), **plotly_kwargs(**extra))
+    fig = fit_fig_for_viewport(polish_fig(fig))
+    try:
+        h = int(fig.layout.height or 360)
+    except Exception:
+        h = 360
+    st.plotly_chart(fig, **plotly_kwargs(height=h, **extra))
 
 
 def _plotly_plain_json(fig: go.Figure) -> str:
@@ -997,23 +1372,40 @@ def equity_drawdown_fig(equity: pd.DataFrame) -> go.Figure:
         showlegend=False,
     ))
     fig.add_trace(go.Scatter(
-        x=ts, y=vals, name="Balance",
+        x=ts, y=vals, name="Live wallet",
         line=dict(color=color, width=2.4),
         fill="tonexty",
         fillcolor="rgba(184,92,92,0.10)",
-        hovertemplate="Balance $%{y:.2f}<extra></extra>",
+        hovertemplate="Wallet $%{y:.2f}<extra></extra>",
         showlegend=False,
     ))
     y_range = _y_range_for_window(vals, peak_vals, pad_frac=0.12)
     # Time-only zoom (pan/scroll); price axis framed to series — not photo-pinch
+    # No x-axis title: tick labels already show dates; a title collides with them.
+    # No vertical y-axis title — section header already says "wallet"; a rotated
+    # label at tight left margin collides with 4-digit tick numbers.
     fig.update_layout(**plotly_layout(
         kind="time",
         uirevision="equity-balance",
         title=None,
-        margin=dict(l=48, r=16, t=12, b=40),
-        yaxis=dict(title="Equity $", range=y_range, fixedrange=True),
-        xaxis=dict(title="Time (UTC)", fixedrange=False),
-        height=340,
+        margin=dict(l=64, r=16, t=8, b=64),
+        yaxis=dict(
+            title=None,
+            range=y_range,
+            fixedrange=True,
+            tickfont=dict(size=11),
+            automargin=False,
+        ),
+        xaxis=dict(
+            title=None,
+            fixedrange=False,
+            tickangle=0,
+            nticks=5,
+            ticks="outside",
+            ticklen=4,
+            tickfont=dict(size=11),
+        ),
+        height=chart_height(400, 280),
         showlegend=False,
     ))
     return polish_fig(fig)

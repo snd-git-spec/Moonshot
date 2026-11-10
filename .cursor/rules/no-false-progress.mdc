@@ -1,0 +1,30 @@
+---
+description: Ban false progress claims; require post-change proof reads before telling the user
+alwaysApply: true
+---
+
+# No false progress
+
+Lying includes: soft claims, optimistic summaries, and "looks good" when the money path is red.
+
+## After any promote / escape / risk / hunt / paper change
+
+Before telling the user it worked, run and cite a **post-change** read:
+
+1. `STRATEGY`/`TIMEFRAME`/`LEVERAGE` from `.env`
+2. Same three from the **paper process** environ (or Live feed book)
+3. Latest `risk_snapshot.halt_reason` / bleed flag
+4. Last ≥5 paper close pnls (or explicit "no new closes since deploy")
+
+If any of 1–2 disagree, the change **failed** — fix apply/restart; do not narrate success.
+
+## Language bans when evidence is missing
+
+- "Should be fine" / "looking good" / "we're on track"
+- "I verified" / "fully checked" without listing what was read
+- "Deployed" when only hunt history or logs show a candidate
+- "Protection is working" as a substitute for profitability when the user asked for profits
+
+## When the user says you failed verification
+
+Do not defend process. Re-read the live scoreboard, state the mismatch in one sentence, then fix the apply path. No recap of prior good intentions.

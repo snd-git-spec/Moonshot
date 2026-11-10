@@ -87,3 +87,16 @@ def test_paper_drift_halts_on_soft_gap() -> None:
     r.set_backtest_band(soft_ret=0.40, min_trades=5, soft_slack=0.30, exp_floor=-0.99)
     assert r.check_paper_drift(n_trades=10, paper_exp=0.0, paper_ret=0.0)
     assert r.drift_halt
+
+
+def test_bleed_halt_blocks_entries() -> None:
+    r = RiskEngine(Config(), silent=True)
+    t0 = pd.Timestamp("2025-01-01", tz="UTC")
+    assert r.trading_allowed(t0)
+    r.set_bleed_halt(True, "paper bleed halt — test")
+    assert r.bleed_halt
+    assert not r.trading_allowed(t0)
+    assert "bleed" in (r.halt_reason or "")
+    r.set_bleed_halt(False)
+    assert not r.bleed_halt
+    assert r.trading_allowed(t0)

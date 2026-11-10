@@ -16,8 +16,8 @@ from dash_lib import (
     load_autopilot_state, load_live_feed, load_practice_activity,
     load_equity, load_trades, load_risk,
     detect_mode, heartbeat_age, format_age, plotly_layout, plotly_kwargs,
-    polish_fig, equity_drawdown_fig, entries_exits_fig, load_symbol_ohlcv,
-    CHART_TIMEFRAMES, chart_bars_for_tf, show_autofit_price_chart,
+    polish_fig, fit_fig_for_viewport, equity_drawdown_fig, entries_exits_fig,
+    load_symbol_ohlcv, CHART_TIMEFRAMES, chart_bars_for_tf, show_autofit_price_chart,
 )
 
 inject_theme()
@@ -560,10 +560,11 @@ def _hunt_progress_fig(history: list) -> go.Figure:
         uirevision="hunt-progress",
         height=300,
         title=None,
-        margin=dict(l=48, r=24, t=36, b=40),
-        xaxis=dict(title="Attempt #"),
+        margin=dict(l=52, r=20, t=20, b=48),
+        xaxis=dict(title=dict(text="Attempt #", standoff=8)),
         yaxis=dict(
-            title="Score / 100", range=[0, 105],
+            title=dict(text="Score / 100", standoff=6),
+            range=[0, 105],
             gridcolor="#2A2F3A", zeroline=False, fixedrange=True,
         ),
         showlegend=False,
@@ -586,7 +587,7 @@ def _trades_pnl_fig(trades: pd.DataFrame, focus: list | None = None,
     if trades.empty:
         fig.update_layout(**plotly_layout(
             kind="time", height=240,
-            title="Closed-trade equity — none closed yet on this universe",
+            title="Realized equity — no closed fills yet",
             uirevision="closed-equity",
         ))
         return polish_fig(fig)
@@ -607,22 +608,31 @@ def _trades_pnl_fig(trades: pd.DataFrame, focus: list | None = None,
         )
     up = float(t["equity"].iloc[-1]) >= float(start_eq)
     fig.add_trace(go.Scatter(
-        x=t["ts"], y=t["equity"], name="Closed equity",
+        x=t["ts"], y=t["equity"], name="Realized (closes only)",
         line=dict(color=GREEN if up else RED, width=2.2),
         fill="tozeroy",
         fillcolor="rgba(61,139,110,0.12)" if up else "rgba(184,92,92,0.12)",
+        hovertemplate="Realized $%{y:.2f}<extra></extra>",
     ))
     fig.add_hline(y=float(start_eq), line_width=1, line_dash="dot", line_color=MUTED)
     ys = [float(v) for v in t["equity"].tolist()] + [float(start_eq)]
     y0, y1 = min(ys), max(ys)
     pad = max(0.5, (y1 - y0) * 0.12)
+    # No vertical y-axis title — section header names the chart; a rotated
+    # "Equity $" at l≈48 overlaps 4-digit tick labels (1100/1050/…).
     fig.update_layout(**plotly_layout(
         kind="time",
         uirevision="closed-equity",
         height=280,
         title=None,
-        margin=dict(l=48, r=16, t=12, b=40),
-        yaxis=dict(title="Equity $", range=[y0 - pad, y1 + pad], fixedrange=True),
+        margin=dict(l=64, r=16, t=12, b=40),
+        yaxis=dict(
+            title=None,
+            range=[y0 - pad, y1 + pad],
+            fixedrange=True,
+            tickfont=dict(size=11),
+            automargin=False,
+        ),
         showlegend=False,
     ))
     return polish_fig(fig)
@@ -830,7 +840,13 @@ def _validation_summary(grade: dict, elite: dict, start_eq: float) -> None:
 
 def _plot(fig: go.Figure) -> None:
     """Render every Live chart polished (no bottom scrubber)."""
-    st.plotly_chart(polish_fig(fig), **plotly_kwargs())
+    fig = fit_fig_for_viewport(polish_fig(fig))
+    # Match Streamlit iframe height to the figure so axis ticks aren't clipped.
+    try:
+        h = int(fig.layout.height or 360)
+    except Exception:
+        h = 360
+    st.plotly_chart(fig, **plotly_kwargs(height=h))
 
 
 _PLOT = plotly_kwargs()  # kept for any leftover **_PLOT usage
@@ -921,6 +937,14 @@ def live_panel() -> None:
                     if e0 > 0:
                         paper_week_pnl = e1 - e0
                         paper_week_ret = (e1 / e0) - 1.0
+        _wd = state.get("scoreboard_watchdog") or {}
+        if _wd.get("critical"):
+            _alerts = _wd.get("alerts") or ["champ / .env mismatch"]
+            st.error(
+                "**SCOREBOARD CRITICAL** — Live may be stranded below champion.  \n"
+                + "  \n".join(f"- {a}" for a in _alerts[:3])
+            )
+
         busy = bool(state.get("busy"))
         passes = int(state.get("improve_passes", 0))
         promote_tier = str(
@@ -1099,41 +1123,44 @@ def live_panel() -> None:
                 f"{bal_pnl:+.2f} vs ${start_eq:.0f} start"
             )
 
+        # Prefer stored hunt metrics — live re-sim blocks the whole page on cloud.
         champ_tile = None
         champ_knobs = _peak_champion_knobs(state)
         if champ_knobs:
-            try:
-                end_ts = _week_end_from_span(week_span)
-                champ_snap = _champion_same_week(
-                    json.dumps(champ_knobs, sort_keys=True, default=str),
-                    end_ts.isoformat(),
-                    float(start_eq),
-                )
-            except Exception as e:
-                champ_snap = None
-                st.caption(f"Champion same-week score unavailable: {e}")
-            if champ_snap is not None:
-                c_ret = float(champ_snap["week_ret"])
+            peak_blob = (
+                state.get("champion_peak")
+                if isinstance(state.get("champion_peak"), dict)
+                else None
+            ) or (
+                state.get("champion")
+                if isinstance(state.get("champion"), dict)
+                else {}
+            )
+            c_ret = None
+            for key in ("week_ret_peak", "week_ret"):
+                try:
+                    if peak_blob.get(key) is not None:
+                        c_ret = float(peak_blob[key])
+                        break
+                except (TypeError, ValueError):
+                    pass
+            if c_ret is not None:
                 c_final = start_eq * (1.0 + c_ret)
-                c_kn = champ_snap.get("knobs") or champ_knobs
-                c_lev = int(c_kn.get("leverage") or 0)
-                c_tf = str(c_kn.get("timeframe") or "")
-                c_strat = str(c_kn.get("strategy") or "")
-                c_n = int(champ_snap.get("trades") or 0)
-                c_span = str(champ_snap.get("span") or week_span or "")
+                c_lev = int(champ_knobs.get("leverage") or 0)
+                c_tf = str(champ_knobs.get("timeframe") or "")
+                c_strat = str(champ_knobs.get("strategy") or "")
+                c_span = str(peak_blob.get("week_span") or week_span or "")
                 c_book = (
                     f"{c_strat} {c_lev}×@{c_tf}".strip()
                     if (c_strat or c_lev or c_tf)
                     else "champion book"
                 )
                 champ_tile = {
-                    "label": f"Champion · same {_HOLDOUT}",
+                    "label": f"Champion · {_HOLDOUT}",
                     "value": f"${c_final:,.0f}",
                     "hint": (
-                        f"{c_book} · ${start_eq:,.0f} → ${c_final:,.0f} ({c_ret:+.0%}) "
-                        f"same window as live"
-                        + (f" ({c_span})" if c_span else "")
-                        + (f" · {c_n} trades" if c_n else "")
+                        f"{c_book} · ${start_eq:,.0f} → ${c_final:,.0f} ({c_ret:+.0%})"
+                        + (f" · {c_span}" if c_span else "")
                     ),
                     "tone": (
                         "good" if c_ret >= week_goal
@@ -1165,7 +1192,7 @@ def live_panel() -> None:
                     "tone": "good" if show_score >= 70 else "",
                 },
                 {
-                    "label": "Practice balance now",
+                    "label": "Live wallet now",
                     "value": f"${last_eq:,.2f}" if last_eq is not None else "—",
                     "hint": bal_hint,
                     "tone": bal_tone,
@@ -1193,7 +1220,7 @@ def live_panel() -> None:
             goal_rows(goals)
             st.caption(
                 "These goals score the current setup on historical data. "
-                "Practice balance above is the live paper wallet — a different number."
+                "Live wallet / realized equity charts below are paper money — different numbers."
             )
 
         st.caption(
@@ -1201,29 +1228,45 @@ def live_panel() -> None:
             f"{passes} search batches run · real exchange money stays off"
         )
 
-        # ---- charts: one job each, full width ----
+        # ---- equity pair: wallet (MTM) vs realized (closes only) ----
         section_header(
-            "Practice balance over time",
-            "Your paper wallet — moves when practice trades close or open positions mark to market",
+            "1 · Live paper wallet",
+            "Includes open positions marked to market · jumps/resets when the bot restarts after a setup change",
         )
         if eq.empty:
-            st.caption("Balance chart fills in as the practice bot runs.")
+            st.caption("Wallet chart fills in as the practice bot runs.")
         else:
             _plot(equity_drawdown_fig(eq))
             st.caption(
-                "Line = paper wallet. Drops back toward the start usually mean a restart "
-                "after a setup change (old closed trades can still show in the count above)."
+                "This is the running paper account. It is not the same as closed-trade P&L below — "
+                "open winners/losers move this line before a fill closes."
+            )
+
+        focus = list(state.get("paper_symbols") or state.get("hunt_symbols") or [])
+        section_header(
+            "2 · Realized equity (closed fills only)",
+            f"Starting ${float(start_eq):.0f} + sum of closed trade P&L · ignores open marks · survives restarts",
+        )
+        if trades.empty:
+            st.caption("No closed paper trades yet — this line appears after the first exit.")
+        else:
+            _plot(_trades_pnl_fig(trades, focus, start_eq=float(start_eq)))
+            st.caption(
+                "Only locked-in closes. If this disagrees with the wallet above, the gap is "
+                "open-position mark-to-market and/or a wallet restart after promote."
             )
 
         hunt_fig = _hunt_progress_fig(history)
-        n_up_hint = ""
+        n_up = 0
         if hunt_fig.data and len(hunt_fig.data[0].y or []) >= 2:
             ys = list(hunt_fig.data[0].y)
-            rises = sum(1 for i in range(1, len(ys)) if float(ys[i]) > float(ys[i - 1]) + 1e-9)
-            n_up_hint = f"{rises} upgrades found · "
+            n_up = sum(1 for i in range(1, len(ys)) if float(ys[i]) > float(ys[i - 1]) + 1e-9)
         section_header(
             "Search progress",
-            f"{n_up_hint}quality score after each search — should climb when a better setup is found",
+            (
+                f"{n_up} upgrade{'s' if n_up != 1 else ''} found so far · "
+                "score should climb when a better setup wins"
+            ),
         )
         _plot(hunt_fig)
 
@@ -1286,8 +1329,8 @@ def live_panel() -> None:
         if not activity:
             st.caption(
                 "No practice fills in the activity feed yet. Hunt can run hundreds of searches "
-                "while paper waits for the next candle setup — check Closed practice trades below "
-                "for older fills."
+                "while paper waits for the next candle setup — check Realized equity above "
+                "for older closes."
             )
         else:
             n_oc = sum(1 for e in activity if e.get("kind") in ("open", "close"))
@@ -1296,14 +1339,6 @@ def live_panel() -> None:
                 f"Showing {len(activity)} practice events ({n_oc} open/close · {n_su} setups). "
                 f"Search attempts on Live are hunt passes, not trades."
             )
-
-        focus = list(state.get("paper_symbols") or state.get("hunt_symbols") or [])
-        if not trades.empty:
-            section_header(
-                "Closed practice trades (all-time)",
-                "Every closed paper trade in the database — not limited to the current restart",
-            )
-            _plot(_trades_pnl_fig(trades, focus, start_eq=float(start_eq)))
 
         if history:
             section_header(
@@ -1339,17 +1374,19 @@ def live_panel() -> None:
                         f"{float(wr):+.0%}" if wr is not None else "—"
                     )
                 elif tested is not None:
-                    # promote_reason stays "baseline" when nothing beat the
-                    # currently deployed book — not a hard block/error.
-                    if why in ("", "baseline"):
+                    # Money truth: not applied ⇒ current setup stayed. Do not
+                    # frame an internal path name (matrix_escape, etc.) as a
+                    # "rejected best" — that read as if something beat Live.
+                    gate = str(h.get("material_why") or "").strip()
+                    if gate and why not in ("", "baseline", "hold"):
                         result = (
                             f"Kept current setup · checked {tested} ideas · "
-                            "nothing beat it"
+                            f"no promote ({gate})"
                         )
                     else:
                         result = (
-                            f"Not applied · checked {tested} ideas · "
-                            f"best candidate rejected ({why})"
+                            f"Kept current setup · checked {tested} ideas · "
+                            "nothing better to deploy"
                         )
                     # HOLD rows re-report the held book's week — not a new find.
                     week_note = (
@@ -1357,7 +1394,7 @@ def live_panel() -> None:
                         if wr is not None else "—"
                     )
                 else:
-                    result = "Not applied"
+                    result = "Kept current setup"
                     week_note = (
                         f"{float(wr):+.0%} (current setup)"
                         if wr is not None else "—"

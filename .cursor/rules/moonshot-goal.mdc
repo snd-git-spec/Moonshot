@@ -1,0 +1,54 @@
+---
+description: Canonical Moonshot goal — deploy the best book, protect capital, climb to +100%/week
+alwaysApply: true
+---
+
+# Moonshot goal (do not dilute)
+
+**Primary job:** continuously find books that make money on paper under the **wired** statistical gates, and actually run the best one Live — climbing toward **+100%/holdout week**, without losing the account getting there.
+
+## In order
+
+1. **Survive first — do not lose money carelessly.**
+   - Bleed halt, streak protection, and circuit pauses stop entries on a dying book. "Paused" is never profit.
+   - **Live capital cap (only when `LIVE_TRADING_ENABLED=1`):** weekly loss cap, leverage cap, max concurrent positions — set explicitly in `.env`, not inferable, not widenable by the loop. If the cap is hit, halt. Do not auto-restart.
+   - **Careless ≠ expected.** A moonshot is allowed to draw down. What is not allowed is deploying a book with no demonstrated edge, at leverage whose routine wick is a wipeout.
+
+2. **Apply what works — but "works" is defined, not felt.**
+   - A candidate qualifies only if it **beats the current Live book on the holdout window** *and* passes the **wired** gates (material week edge, period-robust / relative escape as implemented, MEXC transfer when required, apply verify, interim 2× cost-vs-Live on non-escape research).
+   - **Found ≠ deployed.** If a candidate qualifies and is not deployed, the system is broken — not "still hunting."
+   - **Hysteresis:** replace the incumbent only when the same fingerprint beats Live by **≥2pp absolute** holdout week for **≥2 consecutive** evaluations (except bleed / silence / champion_rescue escape).
+   - **Dwell time:** after a non-escape research promote, **≥24h** before another non-escape replace. Escape/rescue may bypass.
+
+3. **Climb hard — +100% holdout week is the target. Do not soften it.**
+   - What is constrained is *how* it may be reached: lev-up needs a steeper week margin; no violation of rule 1; no pretending a holdout the search has already seen is "sealed."
+   - If no candidate reaches +100% under those constraints, **deploy the best qualifying challenger and keep climbing.** Do **not** deploy a +100% book that fails rule 1 or wired gates — a +100% week that ends the account is not a win.
+
+4. **Practice only until explicitly unfrozen.**
+   - `LIVE_TRADING_ENABLED=0` is the default. The only way to change it is an explicit user env flip. Not a promotion, not a "the book looks ready" inference.
+
+## On any "is it working?" ask — compare five and diagnose
+
+Compare: champion week · Live week · `.env` book · paper book · last paper closes.
+
+- champion ≫ Live **and** `.env` ≠ champion → **broken apply**
+- `.env` = champion **and** Live ≠ paper → **execution divergence**
+- paper book ≠ `.env` book → **stale paper process**
+- champion ≈ Live ≈ paper **and all flat** → **hunting exhausted for this regime** (see stop rule)
+
+## When to stop and reassess — not "keep hunting"
+
+- **N = 50** generations with no candidate qualifying under rule 2 → set exhausted flag; reassess data/objective/universe (do not treat generation climb as progress).
+- **Paper book** shows no positive expectancy over **M = 40** closes → retire / force champion rescue path; do not tune the zombie forever.
+- **Live book** hits the rule-1 loss cap → halt; do not restart until the user explicitly resets.
+
+## What the loop may never change
+
+- Per-trade risk %, daily-loss halt, peak-DD kill (pinned on freeze).
+- Live loss cap fields when live trading is on.
+- `LIVE_TRADING_ENABLED`.
+
+## Honesty — policy vs wired
+
+- **Wired today:** material week edge, period-robust (with escape bypasses), transfer gate, apply+verify, lev-up margins, hysteresis/dwell, paper retire nudge, 2× cost-vs-Live on non-escape research, stop-N flag.
+- **Policy / not yet hard-gated:** sealed holdout unseen by search, DSR promote floor. Do **not** claim a promote failed "sealed/DSR" until those are enforced in code.

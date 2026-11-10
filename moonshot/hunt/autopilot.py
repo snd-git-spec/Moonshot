@@ -29,7 +29,9 @@ from moonshot.live import (
     _utc_now,
 )
 from moonshot.hunt.constants import (
+    HUNT_CHAMP_TRAIL_PP,
     HUNT_TARGETS,
+    _env_book_fingerprint,
     _load_autopilot_state,
     _pct_of_risk_msg,
     _save_autopilot_state,
@@ -46,6 +48,110 @@ from moonshot.paths import (
     ROOT,
 )
 
+# How often the champ/.env/apply watchdog re-checks (seconds).
+SCOREBOARD_WATCHDOG_SEC = 180
+PAPER_BOOK_ASSERT_SEC = 45
+
+
+def _run_scoreboard_watchdog() -> dict:
+    """CRITICAL: champ vs .env strand + apply-fail without re-running full hunt."""
+    st = _load_autopilot_state()
+    env_fp = _env_book_fingerprint()
+    ch = st.get("champion") or {}
+    ck = ch.get("knobs") or {}
+    champ_fp = (
+        str(ck.get("strategy") or ""),
+        str(ck.get("timeframe") or ""),
+        str(ck.get("leverage") or ""),
+    )
+    alerts: list[str] = []
+    critical = False
+
+    champ_week = ch.get("week_ret_live")
+    if champ_week is None:
+        champ_week = ch.get("week_ret")
+    try:
+        champ_week_f = float(champ_week) if champ_week is not None else None
+    except (TypeError, ValueError):
+        champ_week_f = None
+
+    live_dep = st.get("live_deployed") or {}
+    try:
+        live_week = float(live_dep.get("week_ret")) if live_dep.get("week_ret") is not None else None
+    except (TypeError, ValueError):
+        live_week = None
+    if live_week is None:
+        last = (st.get("last_improve") or {})
+        try:
+            live_week = (
+                float(last.get("best", {}).get("week_return"))
+                if (last.get("best") or {}).get("week_return") is not None
+                else None
+            )
+        except (TypeError, ValueError, AttributeError):
+            live_week = None
+
+    if champ_fp[0] and champ_fp != env_fp and champ_week_f is not None:
+        trail = champ_week_f - float(live_week if live_week is not None else -1.0)
+        if trail >= float(HUNT_CHAMP_TRAIL_PP) and champ_week_f >= 0.10:
+            critical = True
+            msg = (
+                f"STRANDED: champ {champ_fp[0]} {champ_fp[2]}x@{champ_fp[1]} "
+                f"week={champ_week_f:+.0%} trails Live by {trail:+.0%}pp but .env is "
+                f"{env_fp[0]} {env_fp[2]}x@{env_fp[1]}"
+            )
+            alerts.append(msg)
+            if not st.get("pending_champion_rescue"):
+                st["pending_champion_rescue"] = True
+            log.critical("SCOREBOARD WATCHDOG · %s", msg)
+            _live_feed("scoreboard_critical", msg, trail_pp=trail)
+
+    hist = list(st.get("history") or [])
+    if hist:
+        last_h = hist[-1]
+        if last_h.get("improved"):
+            hs = str(last_h.get("strategy") or "")
+            ht = str(last_h.get("timeframe") or "")
+            hl = str(last_h.get("leverage") or "")
+            if hs and ht and hl and (hs, ht, hl) != env_fp:
+                critical = True
+                msg = (
+                    f"APPLY-FAIL: history improved {hs} {hl}x@{ht} "
+                    f"reason={last_h.get('promote_reason')} but .env={env_fp}"
+                )
+                alerts.append(msg)
+                log.critical("SCOREBOARD WATCHDOG · %s", msg)
+                _live_feed("scoreboard_critical", msg)
+
+    # Post-restart paper fingerprint: expected_paper_book vs process env
+    expected = st.get("expected_paper_book") or {}
+    if expected.get("strategy"):
+        exp_fp = (
+            str(expected.get("strategy") or ""),
+            str(expected.get("timeframe") or ""),
+            str(expected.get("leverage") or ""),
+        )
+        if exp_fp != env_fp:
+            critical = True
+            msg = f"paper expected book {exp_fp} != .env {env_fp}"
+            alerts.append(msg)
+            log.critical("SCOREBOARD WATCHDOG · %s", msg)
+
+    st["scoreboard_watchdog"] = {
+        "ts": _utc_now().isoformat(),
+        "critical": critical,
+        "alerts": alerts[:8],
+        "env": {"strategy": env_fp[0], "timeframe": env_fp[1], "leverage": env_fp[2]},
+        "champ": {
+            "strategy": champ_fp[0],
+            "timeframe": champ_fp[1],
+            "leverage": champ_fp[2],
+            "week_ret": champ_week_f,
+        },
+    }
+    _save_autopilot_state(st)
+    return st["scoreboard_watchdog"]
+
 
 class PaperSupervisor:
     """Keep `python -m moonshot paper` alive as a child process."""
@@ -58,10 +164,17 @@ class PaperSupervisor:
     def start(self) -> None:
         with self._lock:
             self._stop_unlocked()
+            self._reload_env_into_process()
             cmd = [sys.executable, "-m", "moonshot", "paper"]
             if self.symbols:
                 cmd += ["--symbols", *self.symbols]
-            log.info("starting paper child: %s", " ".join(cmd))
+            log.info(
+                "starting paper child: %s (book %s %sx@%s)",
+                " ".join(cmd),
+                os.environ.get("STRATEGY"),
+                os.environ.get("LEVERAGE"),
+                os.environ.get("TIMEFRAME"),
+            )
             self.proc = subprocess.Popen(
                 cmd,
                 cwd=str(ROOT),
@@ -83,17 +196,74 @@ class PaperSupervisor:
                 self.proc.kill()
         self.proc = None
 
+    @staticmethod
+    def _reload_env_into_process() -> None:
+        """Child must inherit the .env book hunt just wrote — not a stale parent env."""
+        try:
+            from dotenv import load_dotenv
+
+            from moonshot.hunt.constants import (
+                _clear_paper_bleed_circuit,
+                _env_book_fingerprint,
+                _load_autopilot_state,
+                _save_autopilot_state,
+                _utc_now,
+            )
+            from moonshot.paths import ENV_PATH
+
+            load_dotenv(ENV_PATH, override=True)
+            fp = _env_book_fingerprint()
+            st = _load_autopilot_state()
+            prev = st.get("deployed_book") or {}
+            prev_fp = (
+                str(prev.get("strategy") or ""),
+                str(prev.get("timeframe") or ""),
+                str(prev.get("leverage") or ""),
+            )
+            if not fp[0]:
+                return
+            book_changed = fp != prev_fp
+            stale_halt = bool(st.get("paper_bleed_halt")) and not st.get(
+                "paper_bleed_window_start"
+            )
+            if book_changed or stale_halt:
+                _clear_paper_bleed_circuit(st, ts=_utc_now().isoformat())
+                _save_autopilot_state(st)
+                log.info(
+                    "paper bleed circuit cleared · book %s → %s · changed=%s stale_halt=%s",
+                    prev_fp,
+                    fp,
+                    book_changed,
+                    stale_halt,
+                )
+            elif not prev.get("strategy"):
+                st["deployed_book"] = {
+                    "strategy": fp[0],
+                    "timeframe": fp[1],
+                    "leverage": fp[2],
+                    "at": _utc_now().isoformat(),
+                }
+                _save_autopilot_state(st)
+        except Exception as e:
+            log.warning("paper env reload failed: %s", e)
+
     def ensure(self) -> None:
         with self._lock:
             if self.proc is None or self.proc.poll() is not None:
                 code = None if self.proc is None else self.proc.returncode
                 if code not in (None, 0):
                     log.warning("paper child exited with code %s — restarting", code)
-                # start without re-entering lock
+                self._reload_env_into_process()
                 cmd = [sys.executable, "-m", "moonshot", "paper"]
                 if self.symbols:
                     cmd += ["--symbols", *self.symbols]
-                log.info("starting paper child: %s", " ".join(cmd))
+                log.info(
+                    "starting paper child: %s (book %s %sx@%s)",
+                    " ".join(cmd),
+                    os.environ.get("STRATEGY"),
+                    os.environ.get("LEVERAGE"),
+                    os.environ.get("TIMEFRAME"),
+                )
                 self.proc = subprocess.Popen(
                     cmd,
                     cwd=str(ROOT),
@@ -229,6 +399,7 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
         symbols=symbols,
     )
 
+    last_watchdog = 0.0
     try:
         while True:
             supervisor.ensure()
@@ -236,6 +407,51 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
                 restart_paper.clear()
                 log.info("restarting paper with upgraded settings")
                 supervisor.start()
+                # Post-restart: assert child inherited the expected S/T/L.
+                deadline = time.time() + float(PAPER_BOOK_ASSERT_SEC)
+                exp = (_load_autopilot_state().get("expected_paper_book") or {})
+                want = (
+                    str(exp.get("strategy") or os.environ.get("STRATEGY") or ""),
+                    str(exp.get("timeframe") or os.environ.get("TIMEFRAME") or ""),
+                    str(exp.get("leverage") or os.environ.get("LEVERAGE") or ""),
+                )
+                while time.time() < deadline:
+                    got = (
+                        str(os.environ.get("STRATEGY") or ""),
+                        str(os.environ.get("TIMEFRAME") or ""),
+                        str(os.environ.get("LEVERAGE") or ""),
+                    )
+                    if want[0] and got == want:
+                        log.info("paper fingerprint OK · %s %sx@%s", *got)
+                        break
+                    time.sleep(2.0)
+                else:
+                    got = (
+                        str(os.environ.get("STRATEGY") or ""),
+                        str(os.environ.get("TIMEFRAME") or ""),
+                        str(os.environ.get("LEVERAGE") or ""),
+                    )
+                    if want[0] and got != want:
+                        msg = (
+                            f"CRITICAL paper fingerprint mismatch after restart: "
+                            f"want={want} got={got}"
+                        )
+                        log.critical(msg)
+                        _live_feed("scoreboard_critical", msg)
+                        st = _load_autopilot_state()
+                        st["scoreboard_watchdog"] = {
+                            "ts": _utc_now().isoformat(),
+                            "critical": True,
+                            "alerts": [msg],
+                        }
+                        _save_autopilot_state(st)
+            now = time.time()
+            if now - last_watchdog >= float(SCOREBOARD_WATCHDOG_SEC):
+                last_watchdog = now
+                try:
+                    _run_scoreboard_watchdog()
+                except Exception as e:
+                    log.warning("scoreboard watchdog failed: %s", e)
             time.sleep(5)
     except KeyboardInterrupt:
         log.info("autopilot stopped by user")
