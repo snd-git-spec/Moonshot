@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Render Web Service: always-on autopilot + Streamlit UI on $PORT.
+# Always-on: autopilot (hunt + paper) + Streamlit UI on $PORT.
+# Autopilot death must take the service down so systemd/KeepAlive restarts hunt.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -29,14 +30,36 @@ fi
 
 export LIVE_TRADING_ENABLED="${LIVE_TRADING_ENABLED:-0}"
 PORT="${PORT:-8501}"
+# Cloud nginx terminates TLS and proxies to localhost; local/dev may bind 0.0.0.0.
+ADDR="${STREAMLIT_SERVER_ADDRESS:-0.0.0.0}"
 
-# Autopilot (hunt + paper child) — background
 python -m moonshot autopilot --cooldown-seconds "${AUTOPILOT_COOLDOWN_SECONDS:-60}" \
   >>logs/autopilot.log 2>&1 &
-echo $! >logs/autopilot.pid
+APID=$!
+echo "$APID" >logs/autopilot.pid
 
-# Streamlit must stay in foreground so Render health-checks $PORT
-exec python -m streamlit run dashboard.py \
+python -m streamlit run dashboard.py \
   --server.port "$PORT" \
-  --server.address 0.0.0.0 \
-  --server.headless true
+  --server.address "$ADDR" \
+  --server.headless true \
+  >>logs/dashboard.log 2>&1 &
+SPID=$!
+echo "$SPID" >logs/dashboard.pid
+
+cleanup() {
+  kill "$APID" "$SPID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# If hunt dies while UI stays up, the dashboard lies. Exit → systemd restart.
+while true; do
+  if ! kill -0 "$APID" 2>/dev/null; then
+    echo "autopilot pid $APID exited — stopping UI so the service restarts" >&2
+    exit 1
+  fi
+  if ! kill -0 "$SPID" 2>/dev/null; then
+    echo "streamlit pid $SPID exited — stopping autopilot" >&2
+    exit 1
+  fi
+  sleep 5
+done
