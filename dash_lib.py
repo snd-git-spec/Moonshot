@@ -640,7 +640,8 @@ def topbar(balance: Optional[float] = None, score: Optional[int] = None,
     if score is not None:
         right.append(_status_item("Score", f"<b>{int(score)}/100</b>"))
     if pass_n:
-        hunt_lbl = "Hunting…" if busy else f"#{pass_n}"
+        # Always show the search # — "Hunting…" alone looked like the ticker died.
+        hunt_lbl = f"Hunting #{int(pass_n)}" if busy else f"#{int(pass_n)}"
         right.append(_status_item("Hunt", f"<b>{hunt_lbl}</b>"))
     hb = format_age(age)
     hb_cls = "up" if heartbeat_kind(age) == "ok" else ("warn" if heartbeat_kind(age) == "muted" else "down")

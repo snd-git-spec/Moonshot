@@ -973,7 +973,11 @@ def live_panel() -> None:
             cool_left = None
 
         if busy:
-            status_label, status_tone = "Searching for a better setup…", "busy"
+            _gen = int(state.get("generation") or passes or 0)
+            status_label = (
+                f"Searching · pass #{_gen}" if _gen else "Searching for a better setup…"
+            )
+            status_tone = "busy"
         elif just_upgraded:
             status_label, status_tone = "Just switched to a better setup", "ok"
         elif met:
@@ -988,7 +992,10 @@ def live_panel() -> None:
                  else "Practice wallet starting up"),
                 "ok" if paper_ok else "warn",
             ),
-            (f"{lev}× leverage · {tf} candles" if lev else f"{tf} candles", "muted"),
+            (
+                f"Live book {lev}× · {tf}" if lev else f"Live book {tf}",
+                "muted",
+            ),
         ]
         try:
             from moonshot.hunt.constants import autopilot_frozen as _ap_frozen
