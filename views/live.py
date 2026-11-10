@@ -1347,85 +1347,116 @@ def live_panel() -> None:
                 f"Search attempts on Live are hunt passes, not trades."
             )
 
-        if history:
-            section_header(
-                "Recent searches",
-                "Newest first — did this search find a better setup?",
+        section_header(
+            "Recent searches",
+            "Newest first — did this search find a better setup?",
+        )
+        if held_streak >= 3:
+            st.caption(
+                f"Last {held_streak} searches kept the same setup (score {score}/100). "
+                "That means nothing better was found — not a frozen screen."
             )
-            if held_streak >= 3:
-                st.caption(
-                    f"Last {held_streak} searches kept the same setup (score {score}/100). "
-                    "That means nothing better was found — not a frozen screen."
+        # Dedupe by generation (history can log explore+polish same gen)
+        seen_gen: set[int] = set()
+        rows = []
+        # In-progress pass first when history has not logged it yet
+        try:
+            cur_gen = int(state.get("generation") or 0)
+        except (TypeError, ValueError):
+            cur_gen = 0
+        he = state.get("hunt_event") or {}
+        he_kind = str(he.get("kind") or "")
+        try:
+            he_gen = int(he.get("generation") or 0)
+        except (TypeError, ValueError):
+            he_gen = 0
+        show_running = bool(busy) or he_kind == "improve_start"
+        running_gen = he_gen or cur_gen
+        if show_running and running_gen > 0:
+            mode = str(he.get("search_mode") or "search")
+            rows.append({
+                "Search #": running_gen,
+                "What happened": f"In progress · {mode}",
+                "Leverage": "—",
+                "Candle": "—",
+                "Score": "—",
+                "Win rate": "—",
+                f"{_HOLDOUT} history": "—",
+                "Trades in test": "—",
+                "Avg profit": "—",
+            })
+            seen_gen.add(int(running_gen))
+        for h in reversed(history):
+            g = h.get("generation")
+            try:
+                gi = int(g) if g is not None else None
+            except (TypeError, ValueError):
+                gi = None
+            if gi is not None:
+                if gi in seen_gen:
+                    continue
+                seen_gen.add(gi)
+            te = h.get("test_exp")
+            w = h.get("win")
+            wr = h.get("week_return")
+            tested = h.get("tested")
+            why = str(h.get("promote_reason") or "")
+            if h.get("improved"):
+                result = f"Applied to live bot ({why})" if why else "Applied to live bot"
+                week_note = (
+                    f"{float(wr):+.0%}" if wr is not None else "—"
                 )
-            # Dedupe by generation (history can log explore+polish same gen)
-            seen_gen: set[int] = set()
-            rows = []
-            for h in reversed(history):
-                g = h.get("generation")
-                try:
-                    gi = int(g) if g is not None else None
-                except (TypeError, ValueError):
-                    gi = None
-                if gi is not None:
-                    if gi in seen_gen:
-                        continue
-                    seen_gen.add(gi)
-                te = h.get("test_exp")
-                w = h.get("win")
-                wr = h.get("week_return")
-                tested = h.get("tested")
-                why = str(h.get("promote_reason") or "")
-                if h.get("improved"):
-                    result = f"Applied to live bot ({why})" if why else "Applied to live bot"
-                    week_note = (
-                        f"{float(wr):+.0%}" if wr is not None else "—"
-                    )
-                elif tested is not None:
-                    # Money truth: not applied ⇒ current setup stayed. Do not
-                    # frame an internal path name (matrix_escape, etc.) as a
-                    # "rejected best" — that read as if something beat Live.
-                    gate = str(h.get("material_why") or "").strip()
-                    if gate and why not in ("", "baseline", "hold"):
-                        result = (
-                            f"Kept current setup · checked {tested} ideas · "
-                            f"no promote ({gate})"
-                        )
-                    else:
-                        result = (
-                            f"Kept current setup · checked {tested} ideas · "
-                            "nothing better to deploy"
-                        )
-                    # HOLD rows re-report the held book's week — not a new find.
-                    week_note = (
-                        f"{float(wr):+.0%} (current setup)"
-                        if wr is not None else "—"
+            elif tested is not None:
+                # Money truth: not applied ⇒ current setup stayed. Do not
+                # frame an internal path name (matrix_escape, etc.) as a
+                # "rejected best" — that read as if something beat Live.
+                gate = str(h.get("material_why") or "").strip()
+                if gate and why not in ("", "baseline", "hold"):
+                    result = (
+                        f"Kept current setup · checked {tested} ideas · "
+                        f"no promote ({gate})"
                     )
                 else:
-                    result = "Kept current setup"
-                    week_note = (
-                        f"{float(wr):+.0%} (current setup)"
-                        if wr is not None else "—"
+                    result = (
+                        f"Kept current setup · checked {tested} ideas · "
+                        "nothing better to deploy"
                     )
-                sc = h.get("score")
-                lev = h.get("leverage")
-                try:
-                    lev_s = f"{int(lev)}×" if lev is not None else "—"
-                except (TypeError, ValueError):
-                    lev_s = "—"
-                rows.append({
-                    "Search #": h.get("generation"),
-                    "What happened": result,
-                    "Leverage": lev_s,
-                    "Candle": h.get("timeframe") or "—",
-                    "Score": sc if sc is not None else "—",
-                    "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                    f"{_HOLDOUT} history": week_note,
-                    "Trades in test": h.get("test_n"),
-                    "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
-                })
-                if len(rows) >= 24:
-                    break
+                # HOLD rows re-report the held book's week — not a new find.
+                week_note = (
+                    f"{float(wr):+.0%} (current setup)"
+                    if wr is not None else "—"
+                )
+            else:
+                result = "Kept current setup"
+                week_note = (
+                    f"{float(wr):+.0%} (current setup)"
+                    if wr is not None else "—"
+                )
+            sc = h.get("score")
+            lev = h.get("leverage")
+            try:
+                lev_s = f"{int(lev)}×" if lev is not None else "—"
+            except (TypeError, ValueError):
+                lev_s = "—"
+            rows.append({
+                "Search #": h.get("generation"),
+                "What happened": result,
+                "Leverage": lev_s,
+                "Candle": h.get("timeframe") or "—",
+                "Score": sc if sc is not None else "—",
+                "Win rate": f"{float(w):.0%}" if w is not None else "—",
+                f"{_HOLDOUT} history": week_note,
+                "Trades in test": h.get("test_n"),
+                "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
+            })
+            if len(rows) >= 24:
+                break
+        if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, height=420)
+        else:
+            st.caption(
+                "No completed hunt passes in the log yet — list fills as passes finish."
+            )
 
         with st.expander("Activity log", expanded=False):
             interesting = {
