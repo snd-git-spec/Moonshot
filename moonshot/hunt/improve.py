@@ -83,12 +83,10 @@ from moonshot.hunt.scoring import (
     _beats,
     _candidate_cfgs,
     _cfg_fingerprint,
-    _champion_from_history,
     _density_polish_cfgs,
     _raise_champion_peak,
     _resolve_champion_peak,
     _sync_champion_peak,
-    _dedupe_cfgs,
     _dedupe_cfgs_matrix,
     _discover_seed_cfgs,
     _best_by_tf_raise,
@@ -1661,7 +1659,7 @@ def improve_once(
         champ_week_floor = min(champ_week_floor, base_week_ret + 0.001)
         log.info(
             "%s — promote floor eased to deployed week %+0.f%%",
-            f"paper bleed" if paper_bleeding else f"stuck ×{held}",
+            "paper bleed" if paper_bleeding else f"stuck ×{held}",
             champ_week_floor * 100,
         )
 

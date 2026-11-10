@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -32,7 +33,6 @@ from moonshot.hunt.constants import (
     HUNT_LEV25_MIN_WEEK_TRADES,
     HUNT_LEV_BREAKOUT,
     HUNT_LEV_POLISH,
-    HUNT_MATRIX_SOFT_CAP,
     HUNT_MATRIX_TFS,
     HUNT_STRATEGIES,
     HUNT_STUCK_HELD,
@@ -505,10 +505,11 @@ def _resolve_champion_peak(state: dict) -> dict | None:
     for src in (peak, champ):
         if not isinstance(src, dict):
             continue
-        try:
-            peak_w = max(peak_w, float(src.get("week_ret_peak") or src.get("week_ret") or -999))
-        except (TypeError, ValueError):
-            pass
+        with contextlib.suppress(TypeError, ValueError):
+            peak_w = max(
+                peak_w,
+                float(src.get("week_ret_peak") or src.get("week_ret") or -999),
+            )
     out = dict(merged)
     out["week_ret_peak"] = peak_w
     if float(out.get("week_ret") or -999) < peak_w - 0.0005 and peak and peak.get("knobs"):
@@ -877,11 +878,7 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     strat = str(rng.choice(strat_opts))
     # Prefer faster clocks; wide samples full HUNT_TF_ALLOW under lev×tf matrix.
     tf = _tf_for_leverage(int(lev), str(base.timeframe))
-    if wide and rng.random() < 0.55:
-        tf = str(rng.choice(list(HUNT_TF_ALLOW)))
-        if not _lev_tf_allowed(int(lev), tf):
-            tf = _tf_for_leverage(int(lev), tf)
-    elif (not wide) and rng.random() < 0.25:
+    if wide and rng.random() < 0.55 or (not wide) and rng.random() < 0.25:
         tf = str(rng.choice(list(HUNT_TF_ALLOW)))
         if not _lev_tf_allowed(int(lev), tf):
             tf = _tf_for_leverage(int(lev), tf)

@@ -9,7 +9,6 @@ import pandas as pd
 
 from moonshot.config import Config
 from moonshot.discover_fast import (
-    barrier_outcomes_vectorized,
     clear_signal_mask_cache,
     data_hash_from_frame,
     signal_mask,

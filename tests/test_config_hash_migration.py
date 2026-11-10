@@ -42,10 +42,6 @@ def test_migration_idempotent(tmp_path: Path):
     assert "config_hash" in r1["cols"]
     assert r2["added"] == []
     con = sqlite3.connect(str(db))
-    idx = {
-        row[1]
-        for row in con.execute("PRAGMA index_list(trades)").fetchall()
-    }
     # SQLite may name the index; ensure ours exists via sql
     names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")]
     assert "idx_trades_config_hash" in names

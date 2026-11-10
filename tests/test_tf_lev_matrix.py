@@ -15,7 +15,6 @@ from moonshot.hunt.scoring import (
     _freeze_risk,
     _freeze_risk_matrix,
     _lev_tf_allowed,
-    _period_robust_ok,
     _rank_matrix_rows,
     _scale_bar_knobs_for_tf,
     _tf_lev_matrix_cfgs,
@@ -24,21 +23,21 @@ from moonshot.hunt.scoring import (
 
 
 def _base(**kw) -> Config:
-    defaults = dict(
-        strategy="momentum_15",
-        timeframe="5m",
-        leverage=10,
-        aggressive_mode=True,
-        risk_pct=0.03,
-        max_daily_loss_pct=0.32,
-        max_peak_drawdown_pct=0.55,
-        mom_lookback=12,
-        cooldown_bars=3,
-        breakout_lookback=28,
-        time_stop_bars=32,
-        squeeze_lookback=8,
-        pullback_lookback=3,
-    )
+    defaults = {
+        "strategy": "momentum_15",
+        "timeframe": "5m",
+        "leverage": 10,
+        "aggressive_mode": True,
+        "risk_pct": 0.03,
+        "max_daily_loss_pct": 0.32,
+        "max_peak_drawdown_pct": 0.55,
+        "mom_lookback": 12,
+        "cooldown_bars": 3,
+        "breakout_lookback": 28,
+        "time_stop_bars": 32,
+        "squeeze_lookback": 8,
+        "pullback_lookback": 3,
+    }
     defaults.update(kw)
     return Config(**defaults)
 

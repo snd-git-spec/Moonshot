@@ -99,7 +99,7 @@ def test_weekly_bias_completed_bar_no_lookahead():
     assert "w_ema" in feats.columns
     # First rows after incomplete warm-up may be 0; later rows must be ±1 or 0
     vals = feats["weekly_bias"].dropna().unique()
-    assert set(float(v) for v in vals).issubset({-1.0, 0.0, 1.0})
+    assert {float(v) for v in vals}.issubset({-1.0, 0.0, 1.0})
     # Shifted: weekly_bias at t must not depend on same-week incomplete close
     # Sanity: bias is finite and mostly populated after warm-up
     tail = feats["weekly_bias"].iloc[500:]

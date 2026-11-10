@@ -17,15 +17,15 @@ from moonshot.hunt.scoring import (
 
 
 def _base(**kw) -> Config:
-    d = dict(
-        strategy="momentum_15",
-        timeframe="5m",
-        leverage=10,
-        aggressive_mode=True,
-        risk_pct=0.03,
-        max_daily_loss_pct=0.32,
-        max_peak_drawdown_pct=0.55,
-    )
+    d = {
+        "strategy": "momentum_15",
+        "timeframe": "5m",
+        "leverage": 10,
+        "aggressive_mode": True,
+        "risk_pct": 0.03,
+        "max_daily_loss_pct": 0.32,
+        "max_peak_drawdown_pct": 0.55,
+    }
     d.update(kw)
     return Config(**d)
 

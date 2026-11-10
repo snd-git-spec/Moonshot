@@ -53,13 +53,15 @@ def barrier_outcomes_vectorized(
     """
     o = df["open"].to_numpy(float)
     h = df["high"].to_numpy(float)
-    l = df["low"].to_numpy(float)
+    low = df["low"].to_numpy(float)
     c = df["close"].to_numpy(float)
     if atr is None:
         # Local ATR(14) without importing moonshot.atr (keeps unit tests light)
         prev_c = np.roll(c, 1)
         prev_c[0] = c[0]
-        tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+        tr = np.maximum(
+            h - low, np.maximum(np.abs(h - prev_c), np.abs(low - prev_c))
+        )
         atr = pd.Series(tr).rolling(14).mean().to_numpy(float)
     n = len(df)
     rl = np.full(n, np.nan)
@@ -73,7 +75,7 @@ def barrier_outcomes_vectorized(
         d = STOP_ATR * atr[t]
         cost_r = cost * e / d
         hi = h[t + 1 : t + 1 + hold]
-        lo = l[t + 1 : t + 1 + hold]
+        lo = low[t + 1 : t + 1 + hold]
         # long
         stop_l, tgt_l = e - d, e + TARGET_R * d
         hit_stop = np.flatnonzero(lo <= stop_l)
