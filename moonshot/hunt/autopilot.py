@@ -189,8 +189,23 @@ def _run_scoreboard_watchdog() -> dict:
             "week_ret": champ_week_f,
         },
     }
-    _save_autopilot_state(st)
-    return st["scoreboard_watchdog"]
+    # Merge onto latest disk state — do not clobber mid-pass fields written by improve_once.
+    patch = {
+        "scoreboard_watchdog": st["scoreboard_watchdog"],
+        "pending_champion_rescue": st.get("pending_champion_rescue"),
+        "champ_trail_streak": st.get("champ_trail_streak"),
+    }
+    if st.get("force_matrix_slim"):
+        patch["force_matrix_slim"] = True
+        patch["hunt_recover_reason"] = st.get("hunt_recover_reason")
+    latest = _load_autopilot_state()
+    latest.update({k: v for k, v in patch.items() if v is not None or k == "pending_champion_rescue"})
+    if st.get("force_matrix_slim"):
+        latest["force_matrix_slim"] = True
+        if st.get("hunt_recover_reason"):
+            latest["hunt_recover_reason"] = st["hunt_recover_reason"]
+    _save_autopilot_state(latest)
+    return latest["scoreboard_watchdog"]
 
 
 class PaperSupervisor:

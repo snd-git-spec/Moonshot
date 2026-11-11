@@ -57,13 +57,60 @@ def test_watchdog_oom_hint_sets_reason_oom(monkeypatch):
         "live_deployed": {},
         "history": [],
     }
-    monkeypatch.setattr(ap, "_load_autopilot_state", lambda: state)
+    saved = {}
+
+    def _load():
+        return dict(state)
+
+    def _save(st):
+        saved.clear()
+        saved.update(st)
+        state.clear()
+        state.update(st)
+
+    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
     monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("", "", ""))
-    monkeypatch.setattr(ap, "_save_autopilot_state", lambda st: None)
+    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
     monkeypatch.setattr(ap, "recent_oom_hint", lambda: True)
 
     out = ap._run_scoreboard_watchdog()
     assert out["critical"] is True
-    assert state["hunt_recover_reason"] == "oom"
-    assert state["force_matrix_slim"] is True
+    assert saved["hunt_recover_reason"] == "oom"
+    assert saved["force_matrix_slim"] is True
+
+
+def test_watchdog_save_preserves_pass_started_at(monkeypatch):
+    """Regression: watchdog must not clobber improve_once pass lifecycle fields."""
+    from moonshot.hunt import autopilot as ap
+
+    disk = {
+        "mode": "hunt",
+        "busy": True,
+        "last_improve_at": _iso(float(HUNT_STALE_FINISH_HOURS) + 2.0),
+        "pass_started_at": "2026-11-11T11:32:11+00:00",
+        "pass_heartbeat_at": "2026-11-11T11:32:40+00:00",
+        "hunt_event": {"kind": "improve_start", "ts": _iso(0.05)},
+        "champion": {},
+        "live_deployed": {},
+        "history": [],
+        "generation": 1904,
+    }
+
+    def _load():
+        return dict(disk)
+
+    def _save(st):
+        disk.clear()
+        disk.update(st)
+
+    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
+    monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("", "", ""))
+    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
+    monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
+    monkeypatch.setattr(ap, "recent_oom_hint", lambda: False)
+
+    ap._run_scoreboard_watchdog()
+    assert disk["pass_started_at"] == "2026-11-11T11:32:11+00:00"
+    assert disk["pass_heartbeat_at"] == "2026-11-11T11:32:40+00:00"
+    assert disk["force_matrix_slim"] is True
