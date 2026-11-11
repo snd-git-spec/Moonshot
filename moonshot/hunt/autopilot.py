@@ -43,6 +43,10 @@ from moonshot.hunt.scoring import (
 from moonshot.hunt.improve import (
     improve_once,
 )
+from moonshot.hunt.health import (
+    hunt_pass_health,
+    recent_oom_hint,
+)
 
 from moonshot.paths import (
     ROOT,
@@ -54,7 +58,7 @@ PAPER_BOOK_ASSERT_SEC = 45
 
 
 def _run_scoreboard_watchdog() -> dict:
-    """CRITICAL: champ vs .env strand + apply-fail without re-running full hunt."""
+    """CRITICAL: champ vs .env strand + apply-fail + stuck/no-finish pass recovery."""
     st = _load_autopilot_state()
     env_fp = _env_book_fingerprint()
     ch = st.get("champion") or {}
@@ -66,6 +70,23 @@ def _run_scoreboard_watchdog() -> dict:
     )
     alerts: list[str] = []
     critical = False
+
+    # Pass finish liveness (OOM-restart loops look "busy" forever without this).
+    pass_h = hunt_pass_health(st, process_alive=True, mode=str(st.get("mode") or ""))
+    for msg in pass_h.get("failures") or []:
+        critical = True
+        alerts.append(msg)
+        log.critical("SCOREBOARD WATCHDOG · %s", msg)
+        _live_feed("scoreboard_critical", msg)
+        reason = "no_finish" if "HUNT_NO_FINISH" in msg else "pass_stuck"
+        if recent_oom_hint():
+            reason = "oom"
+        st["force_matrix_slim"] = True
+        st["hunt_recover_reason"] = reason
+        log.warning(
+            "SCOREBOARD WATCHDOG · force_matrix_slim=1 reason=%s (lev 5/7/10 retained)",
+            reason,
+        )
 
     champ_week = ch.get("week_ret_live")
     if champ_week is None:

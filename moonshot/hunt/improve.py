@@ -141,6 +141,31 @@ def improve_once(
     generation: int = 0,
     hunt: bool = True,
 ) -> dict:
+    """One hunt/improve pass — always writes a finish record (HOLD or abort)."""
+    try:
+        return _improve_once_impl(
+            symbols,
+            bars=bars,
+            oos_frac=oos_frac,
+            refresh=refresh,
+            generation=generation,
+            hunt=hunt,
+        )
+    except Exception as e:
+        from moonshot.hunt.health import record_pass_abort
+
+        log.exception("improve_once failed mid-pass: %s", e)
+        return record_pass_abort(generation=generation, error=e, recover=True)
+
+
+def _improve_once_impl(
+    symbols: list,
+    bars: int = 5000,
+    oos_frac: float = 0.3,
+    refresh: bool = False,
+    generation: int = 0,
+    hunt: bool = True,
+) -> dict:
     """
     One hunt/improve pass. Keeps the global best-ever; aims at HUNT_TARGETS.
     Never enables live trading.
@@ -185,6 +210,33 @@ def improve_once(
         search_mode=search_mode,
         held_streak=held,
     )
+    # Pass lifecycle — finish signal for MemoryMax / OOM-restart detection.
+    force_slim = bool(state.pop("force_matrix_slim", False))
+    recover_reason = state.pop("hunt_recover_reason", None)
+    if force_slim and not recover_reason:
+        recover_reason = "pass_stuck"
+    _pass_now = _utc_now().isoformat()
+    state["pass_started_at"] = _pass_now
+    state["pass_heartbeat_at"] = _pass_now
+    state["busy"] = True
+    if force_slim:
+        log.info(
+            "force_matrix_slim · reason=%s · Live TF only (lev 5/7/10 retained)",
+            recover_reason,
+        )
+    _save_autopilot_state(state)
+
+    def _pass_heartbeat() -> None:
+        ts = _utc_now().isoformat()
+        state["pass_heartbeat_at"] = ts
+        try:
+            st_hb = _load_autopilot_state()
+            st_hb["pass_heartbeat_at"] = ts
+            if st_hb.get("pass_started_at"):
+                st_hb["pass_started_at"] = state.get("pass_started_at")
+            _save_autopilot_state(st_hb)
+        except Exception:
+            pass
     # Funnel hunt: confirm book (multi-coin) + scout book (BTC only).
     tf_s = str(base.timeframe)
     hunt_tier = "confirm" if hunt else "finalist"
@@ -674,12 +726,15 @@ def improve_once(
             skip_heavy_search=bool(skip_heavy_search),
             live_week_ret=float(base_week.get("ret") or 0),
             hunt_exhausted=bool(state.get("hunt_exhausted")),
+            force_slim=bool(force_slim),
         )
         if matrix_tfs != tuple(HUNT_MATRIX_TFS):
             log.info(
-                "tf×lev matrix slim · tfs=%s · skip_heavy=%s held=%s mode=%s live_week=%+.0f%%",
+                "tf×lev matrix slim · tfs=%s · skip_heavy=%s force_slim=%s held=%s "
+                "mode=%s live_week=%+.0f%%",
                 matrix_tfs,
                 skip_heavy_search,
+                force_slim,
                 held,
                 search_mode,
                 float(base_week.get("ret") or 0) * 100,
@@ -793,6 +848,7 @@ def improve_once(
                     hard_rows.append(row)
                     log.warning("matrix cell %sx@%s failed: %s", cand.leverage, cand.timeframe, e)
             _prune_tf(tf_s_m)
+            _pass_heartbeat()
             log.info("matrix hard done · tf=%s · rows=%d", tf_s_m, len(cells_by_tf.get(tf_s_m, [])))
 
         # Soft+robust only top-N density-ok by hard week_ret (reload per cell).
@@ -972,8 +1028,13 @@ def improve_once(
     # denser when stuck / explore / breakout: Live-TF knob grid only (~81).
     # Cross-TF diversity = sequential TF×lev matrix + explore TF jumps.
     # Do not inject other-TF denser seeds (Stage A reloads full books → OOM).
+    # OOM recovery skips denser — keep Stage A Live-TF only; lev 5/7/10 stay in matrix.
     denser: list[Config] = []
-    if (not skip_heavy_search) and (
+    _pass_heartbeat()
+    _skip_denser = bool(force_slim) and str(recover_reason or "") == "oom"
+    if _skip_denser:
+        log.info("denser skipped · oom recovery (Stage A Live-TF only)")
+    elif (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
         _live_tf = str(polish_base.timeframe)
@@ -1025,6 +1086,7 @@ def improve_once(
     # ---- Stage A: cheap BTC short-window week rank (defer full IS/OOS to B/C) ----
     stage_a: list = []
     thin_a: list = []
+    _pass_heartbeat()
     # Live TF only in Stage A on the 2G droplet — explore TF jumps were
     # re-fetching 15m/1h/4h books and OOMing before HOLD. Other TFs are
     # already scored in the sequential matrix; B/C may still see survivors.
@@ -2409,6 +2471,8 @@ def improve_once(
     state["generation"] = generation
     state["improve_passes"] = int(state.get("improve_passes", 0)) + 1
     state["busy"] = False
+    state.pop("pass_started_at", None)
+    state.pop("pass_heartbeat_at", None)
     # Live must show the DEPLOYED book. On HOLD, never paint an unpromoted
     # candidate week (that is how +16% became -21% on the dashboard).
     state["grade"] = best_grade if improved else base_grade

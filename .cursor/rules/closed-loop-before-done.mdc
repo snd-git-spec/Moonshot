@@ -1,0 +1,30 @@
+---
+description: Check/optimize is not done until a hunt pass finishes on cloud — activity is not proof
+alwaysApply: true
+---
+
+# Closed loop before “checked / optimized / done”
+
+When the user asks to **check**, **optimize**, **fix**, or **verify** Moonshot (hunt, paper, deploy, gates), a local or mid-pass signal is **not** completion.
+
+## Mandatory cloud closed-loop (cite numbers)
+
+Before saying checked / optimized / fixed / hunting / working:
+
+1. **Finish signal** — `last_improve_at` (or latest HOLD / pass-complete log) is **newer** than the change/restart. If still the pre-change timestamp: **not done** — say frozen age, do not narrate progress.
+2. **Alive ≠ healthy** — PID up + `busy=true` + generation climbing without (1) = **stuck or OOM-restart loop**, not success.
+3. **Kill path** — check journal/dmesg/cgroup for OOM or MemoryMax kills since the change. If present: **failed**, even if the process restarted.
+4. **Money path** — `.env` book = paper environ book; last paper closes / halt_reason read after the change (same as money-scoreboard rule).
+
+If you cannot wait for (1), say **pending closed-loop** and the exact pre-change `last_improve_at` — never “optimized.”
+
+## Forbidden substitutes (these caused the gaps)
+
+- “Matrix/FULL/denser logged” without a later HOLD / `last_improve` move
+- “Autopilot active / dashboard up / pulse fresh”
+- “Deployed” + code path verified only (no finish signal)
+- Claiming the named sub-fix (diversity, format, TF ladder) while the hunt loop is dead
+
+## Default stance
+
+Prefer reporting **stuck / frozen / OOM / apply broken** over “still hunting.” Partial verification is a failed check — name what was not read.

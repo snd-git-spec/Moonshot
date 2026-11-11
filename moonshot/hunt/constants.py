@@ -149,6 +149,10 @@ HUNT_BREAKOUT_N = 56
 HUNT_SOFT_BUDGET = {"polish": 10, "explore": 14, "breakout": 16}
 # After this many HOLD passes, loosen floor / widen confirm so overnight climb continues
 HUNT_STUCK_HELD = 6
+# Pass liveness (MemoryMax / OOM-restart loops): finish signal, not activity.
+HUNT_PASS_MAX_HOURS = 2.5  # busy + pass_started_at older than this → stuck
+HUNT_STALE_FINISH_HOURS = 6.0  # no last_improve_at move → HUNT_NO_FINISH
+HUNT_TERMINAL_GRACE_MIN = 15.0  # ignore stale right after hold/upgrade/etc.
 HUNT_CHAMPION_STALE_PP = 0.08  # stored peak − live reeval ≥ 8pp → floor uses live
 HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
 # A.4 — research allow-list includes 1h/4h; keep 5m/15m for continuity.

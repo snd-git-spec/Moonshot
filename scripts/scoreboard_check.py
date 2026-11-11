@@ -29,9 +29,11 @@ if str(ROOT) not in sys.path:
 
 from moonshot.hunt.constants import (  # noqa: E402
     ENV_PATH,
+    HUNT_STALE_FINISH_HOURS,
     _env_book_fingerprint,
     _load_autopilot_state,
 )
+from moonshot.hunt.health import hunt_pass_health  # noqa: E402
 from moonshot.hunt.scoring import _paper_bleed  # noqa: E402
 from moonshot.paths import DB_PATH  # noqa: E402
 
@@ -40,7 +42,8 @@ CHAMP_TRAIL_FAIL_PP = 0.15
 CHAMP_MIN_WEEK = 0.10
 # Hunt mode with a dead autopilot process is never "SCOREBOARD OK".
 AUTOPILOT_PID_PATH = ROOT / "logs" / "autopilot.pid"
-HUNT_STALE_IMPROVE_HOURS = 6.0
+# Back-compat alias — finish staleness lives in hunt.health / constants.
+HUNT_STALE_IMPROVE_HOURS = float(HUNT_STALE_FINISH_HOURS)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -231,40 +234,16 @@ def check() -> dict:
     mode = str(st.get("mode") or "")
     last_improve_at = str(st.get("last_improve_at") or "")
     improve_age_h = _hours_since(last_improve_at)
-    started_age_h = _hours_since(str(st.get("started_at") or ""))
-    hunt_ev = st.get("hunt_event") or {}
-    hunt_ev_age_h = _hours_since(str(hunt_ev.get("ts") or ""))
     if mode == "hunt" and not proc["alive"]:
         failures.append(
             f"HUNT_DEAD: mode=hunt but autopilot pid={proc['pid'] or '?'} "
             f"not running (last_improve_at={last_improve_at or 'missing'})"
         )
     elif mode == "hunt" and proc["alive"]:
-        # Fresh restart: started_at/hunt_event beat a stale last_improve_at.
-        recently_started = started_age_h is not None and started_age_h < HUNT_STALE_IMPROVE_HOURS
-        recent_hunt_ev = hunt_ev_age_h is not None and hunt_ev_age_h < HUNT_STALE_IMPROVE_HOURS
-        if (
-            improve_age_h is not None
-            and improve_age_h >= HUNT_STALE_IMPROVE_HOURS
-            and not recently_started
-            and not recent_hunt_ev
-            and not st.get("busy")
-        ):
-            failures.append(
-                f"HUNT_STALE: last_improve_at {improve_age_h:.1f}h ago "
-                f"(>{HUNT_STALE_IMPROVE_HOURS:.0f}h) while mode=hunt busy=False"
-            )
-        elif (
-            improve_age_h is not None
-            and improve_age_h >= HUNT_STALE_IMPROVE_HOURS
-            and st.get("busy")
-            and not recently_started
-            and not recent_hunt_ev
-        ):
-            warnings.append(
-                f"hunt busy=True but last_improve_at {improve_age_h:.1f}h ago — "
-                "confirm pass still progressing"
-            )
+        # Finish signal only — busy / fresh started_at / improve_start do NOT carve out.
+        pass_h = hunt_pass_health(st, process_alive=True, mode=mode)
+        failures.extend(pass_h["failures"])
+        warnings.extend(pass_h["warnings"])
 
     if (
         st.get("pending_champion_rescue")

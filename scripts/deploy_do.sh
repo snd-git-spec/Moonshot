@@ -45,6 +45,7 @@ Environment=STREAMLIT_SERVER_ADDRESS=127.0.0.1
 MemoryMax=2000M
 OVR
 # Clamp corrupt generation / clear stuck busy from dead hunt mid-pass.
+# Deploy is NOT a finished pass — tag recover so next pass may slim if needed.
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -52,13 +53,26 @@ p = Path("/opt/moonshot/.moonshot_autopilot.json")
 s = json.loads(p.read_text())
 passes = int(s.get("improve_passes") or 0)
 gen = int(s.get("generation") or 0)
-print("before", {"generation": gen, "improve_passes": passes, "busy": s.get("busy")})
+print("before", {
+    "generation": gen,
+    "improve_passes": passes,
+    "busy": s.get("busy"),
+    "last_improve_at": s.get("last_improve_at"),
+})
 if passes > 0 and gen > passes + 50:
     s["generation"] = passes
 s["busy"] = False
 s["pending_champion_rescue"] = False
+s["hunt_recover_reason"] = "deploy"
+# Do not clear last_improve_at — closed-loop verify needs the pre-deploy finish stamp.
 p.write_text(json.dumps(s, indent=2))
-print("after", {"generation": s.get("generation"), "busy": s.get("busy")})
+print("after", {
+    "generation": s.get("generation"),
+    "busy": s.get("busy"),
+    "improve_passes": s.get("improve_passes"),
+    "last_improve_at": s.get("last_improve_at"),
+    "hunt_recover_reason": s.get("hunt_recover_reason"),
+})
 PY
 .venv/bin/pip install -q -e .
 systemctl daemon-reload
@@ -71,9 +85,17 @@ import json
 from pathlib import Path
 s = json.loads(Path("/opt/moonshot/.moonshot_autopilot.json").read_text())
 he = s.get("hunt_event") or {}
-print("remote_gen", s.get("generation"), "busy", s.get("busy"),
-      "started", s.get("started_at"),
-      "hunt", he.get("kind"), he.get("generation"), str(he.get("message") or "")[:100])
+print(
+    "remote_gen", s.get("generation"),
+    "busy", s.get("busy"),
+    "improve_passes", s.get("improve_passes"),
+    "last_improve_at", s.get("last_improve_at"),
+    "pass_started_at", s.get("pass_started_at"),
+    "force_slim", s.get("force_matrix_slim"),
+    "recover", s.get("hunt_recover_reason"),
+    "started", s.get("started_at"),
+    "hunt", he.get("kind"), he.get("generation"), str(he.get("message") or "")[:100],
+)
 PY
 echo "deployed_sha $SHA"
 grep -n 'autopilot pid' /opt/moonshot/scripts/render_start.sh | head -3

@@ -667,6 +667,7 @@ def _matrix_tfs_for_pass(
     skip_heavy_search: bool,
     live_week_ret: float,
     hunt_exhausted: bool = False,
+    force_slim: bool = False,
 ) -> tuple[str, ...]:
     """Which TFs the TF×lev matrix scores this pass.
 
@@ -675,7 +676,10 @@ def _matrix_tfs_for_pass(
     Stuck / explore / breakout / exhausted always get the full matrix.
     Polish + strong Live may slim; champ-rescue short-circuit may slim only
     when not stuck.
+    force_slim (OOM / pass-stuck recovery): Live TF only — lev 5/7/10 still run.
     """
+    if force_slim:
+        return (str(base_tf),)
     stuck = int(held) >= int(HUNT_STUCK_HELD)
     need_breadth = stuck or bool(hunt_exhausted) or str(search_mode) in ("explore", "breakout")
     if need_breadth:

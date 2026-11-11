@@ -91,3 +91,17 @@ def test_skip_heavy_slims_only_when_not_stuck():
         live_week_ret=0.10,
     )
     assert full == tuple(HUNT_MATRIX_TFS)
+
+
+def test_force_slim_overrides_stuck_full_matrix():
+    """OOM / pass-stuck recovery: Live TF only — stuck must not force FULL TFs."""
+    tfs = _matrix_tfs_for_pass(
+        base_tf="5m",
+        held=int(HUNT_STUCK_HELD) + 5,
+        search_mode="breakout",
+        skip_heavy_search=False,
+        live_week_ret=0.01,
+        hunt_exhausted=True,
+        force_slim=True,
+    )
+    assert tfs == ("5m",)
