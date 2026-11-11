@@ -945,42 +945,56 @@ def improve_once(
             cand_list.append(seed)
         except Exception:
             pass
-    # denser grid when stuck / explore / breakout — always all matrix TFs so we
-    # leave whatever Live candle is deployed (5m/15m/1h/4h), not only 5m.
+    # denser when stuck / explore / breakout.
+    # Full knob grid on Live TF only (~81). Cross-TF is a *thin* seed per
+    # other candle (strat×lev) — NOT 81×4 TFs. The full cartesian product
+    # OOMs the 1700M droplet cgroup mid Stage-A (~every 8–10 min) so passes
+    # never finish and Recent searches freezes on the last HOLD.
     denser: list[Config] = []
     if (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
-        dense_tfs: tuple[str, ...] = tuple(HUNT_MATRIX_TFS)
-        denser = []
-        for _dtf in dense_tfs:
+        _live_tf = str(polish_base.timeframe)
+
+        def _dense_cell(
+            base_cfg: Config, *, st: str, lev: int, adx: float, cd: int, tf: str
+        ) -> Config:
+            return replace(
+                base_cfg,
+                strategy=str(st),
+                leverage=int(lev),
+                timeframe=str(tf),
+                adx_enter=float(adx),
+                adx_exit=float(max(10.0, adx - 5)),
+                require_squeeze=False,
+                require_rising_adx=False,
+                cooldown_bars=int(cd),
+                volume_multiplier=1.1,
+                mom_lookback=8,
+                mom_min_atr=0.35,
+                max_account_leverage=float(max(lev, float(polish_base.max_account_leverage))),
+                max_net_leverage=float(max(lev, float(polish_base.max_net_leverage))),
+            )
+
+        for st in HUNT_STRATEGIES:
+            for lev in (5, 7, 10):
+                for adx in (14.0, 16.0, 18.0):
+                    for cd in (0, 1, 2):
+                        denser.append(
+                            _dense_cell(polish_base, st=st, lev=lev, adx=adx, cd=cd, tf=_live_tf)
+                        )
+        for _dtf in HUNT_MATRIX_TFS:
+            if str(_dtf) == _live_tf:
+                continue
             scaled = _scale_bar_knobs_for_tf(polish_base, str(_dtf))
             for st in HUNT_STRATEGIES:
                 for lev in (5, 7, 10):
-                    for adx in (14.0, 16.0, 18.0):
-                        for cd in (0, 1, 2):
-                            denser.append(
-                                replace(
-                                    scaled,
-                                    strategy=str(st),
-                                    leverage=int(lev),
-                                    timeframe=str(_dtf),
-                                    adx_enter=float(adx),
-                                    adx_exit=float(max(10.0, adx - 5)),
-                                    require_squeeze=False,
-                                    require_rising_adx=False,
-                                    cooldown_bars=int(cd),
-                                    volume_multiplier=1.1,
-                                    mom_lookback=8,
-                                    mom_min_atr=0.35,
-                                    max_account_leverage=float(
-                                        max(lev, float(polish_base.max_account_leverage))
-                                    ),
-                                    max_net_leverage=float(
-                                        max(lev, float(polish_base.max_net_leverage))
-                                    ),
-                                )
-                            )
+                    denser.append(_dense_cell(scaled, st=st, lev=lev, adx=16.0, cd=1, tf=str(_dtf)))
+        log.info(
+            "denser inject · live_tf=%s · n=%d (live_grid + cross_tf seeds)",
+            _live_tf,
+            len(denser),
+        )
     # Dedupe with polish_base as freeze anchor so matrix lev/tf survive
     cand_list = _dedupe_cfgs_matrix(polish_base, list(cand_list) + denser)
     cand_list, banned_skipped = _filter_banned(cand_list, banned)
