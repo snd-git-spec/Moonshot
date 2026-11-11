@@ -115,6 +115,8 @@ from moonshot.hunt.scoring import (
     _rank_matrix_rows,
     _rank_matrix_rows_escape,
     _recent_eval,
+    _matrix_tfs_for_pass,
+    _scale_bar_knobs_for_tf,
     _select_polish_base,
     _should_ban_week,
     _tf_lev_matrix_cfgs,
@@ -662,20 +664,33 @@ def improve_once(
     skip_heavy_search = bool(state.get("pending_champion_rescue")) or (
         int(state.get("champ_trail_streak") or 0) >= int(HUNT_CHAMP_TRAIL_PASSES)
     )
-    # Slim matrix when Live week already strong — current TF only.
-    live_week_strong = float(base_week.get("ret") or 0) >= 0.15
+    # Full TF matrix when stuck/explore/breakout — do NOT slim just because
+    # Live week ≥15% (that locked hunt onto 5m-only for dozens of HOLDs).
     try:
-        matrix_tfs = (
-            (str(base.timeframe),)
-            if (skip_heavy_search or live_week_strong)
-            else tuple(HUNT_MATRIX_TFS)
+        matrix_tfs = _matrix_tfs_for_pass(
+            base_tf=str(base.timeframe),
+            held=int(held),
+            search_mode=str(search_mode),
+            skip_heavy_search=bool(skip_heavy_search),
+            live_week_ret=float(base_week.get("ret") or 0),
+            hunt_exhausted=bool(state.get("hunt_exhausted")),
         )
-        if skip_heavy_search or live_week_strong:
+        if matrix_tfs != tuple(HUNT_MATRIX_TFS):
             log.info(
-                "tf×lev matrix slim · tfs=%s · skip_heavy=%s live_strong=%s",
+                "tf×lev matrix slim · tfs=%s · skip_heavy=%s held=%s mode=%s live_week=%+.0f%%",
                 matrix_tfs,
                 skip_heavy_search,
-                live_week_strong,
+                held,
+                search_mode,
+                float(base_week.get("ret") or 0) * 100,
+            )
+        else:
+            log.info(
+                "tf×lev matrix FULL · tfs=%s · held=%s mode=%s live_week=%+.0f%%",
+                matrix_tfs,
+                held,
+                search_mode,
+                float(base_week.get("ret") or 0) * 100,
             )
         for _tf_warm in matrix_tfs:
             _raw_for_tf(str(_tf_warm))
@@ -930,34 +945,49 @@ def improve_once(
             cand_list.append(seed)
         except Exception:
             pass
-    _dense_tf = str(polish_base.timeframe)
-    # denser×81 only when stuck / explore / breakout — not every polish pass
+    # denser grid when stuck / explore / breakout — multi-TF so we leave the
+    # Live clock (was pinned to polish_base TF → endless 5m clones).
     denser: list[Config] = []
     if (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
-        denser = [
-            replace(
-                polish_base,
-                strategy=str(st),
-                leverage=int(lev),
-                timeframe=_dense_tf,
-                adx_enter=float(adx),
-                adx_exit=float(max(10.0, adx - 5)),
-                require_squeeze=False,
-                require_rising_adx=False,
-                cooldown_bars=int(cd),
-                volume_multiplier=1.1,
-                mom_lookback=8,
-                mom_min_atr=0.35,
-                max_account_leverage=float(max(lev, float(polish_base.max_account_leverage))),
-                max_net_leverage=float(max(lev, float(polish_base.max_net_leverage))),
+        if held >= int(HUNT_STUCK_HELD) or search_mode == "breakout":
+            dense_tfs: tuple[str, ...] = tuple(HUNT_MATRIX_TFS)
+        else:
+            # explore: Live TF + two coarser clocks (cheaper than full×4)
+            _bt = str(polish_base.timeframe)
+            dense_tfs = tuple(
+                dict.fromkeys((_bt, "15m", "1h", "4h") if _bt == "5m" else (_bt, "5m", "15m", "1h"))
             )
-            for st in HUNT_STRATEGIES
-            for lev in (5, 7, 10)
-            for adx in (14.0, 16.0, 18.0)
-            for cd in (0, 1, 2)
-        ]
+        denser = []
+        for _dtf in dense_tfs:
+            scaled = _scale_bar_knobs_for_tf(polish_base, str(_dtf))
+            for st in HUNT_STRATEGIES:
+                for lev in (5, 7, 10):
+                    for adx in (14.0, 16.0, 18.0):
+                        for cd in (0, 1, 2):
+                            denser.append(
+                                replace(
+                                    scaled,
+                                    strategy=str(st),
+                                    leverage=int(lev),
+                                    timeframe=str(_dtf),
+                                    adx_enter=float(adx),
+                                    adx_exit=float(max(10.0, adx - 5)),
+                                    require_squeeze=False,
+                                    require_rising_adx=False,
+                                    cooldown_bars=int(cd),
+                                    volume_multiplier=1.1,
+                                    mom_lookback=8,
+                                    mom_min_atr=0.35,
+                                    max_account_leverage=float(
+                                        max(lev, float(polish_base.max_account_leverage))
+                                    ),
+                                    max_net_leverage=float(
+                                        max(lev, float(polish_base.max_net_leverage))
+                                    ),
+                                )
+                            )
     # Dedupe with polish_base as freeze anchor so matrix lev/tf survive
     cand_list = _dedupe_cfgs_matrix(polish_base, list(cand_list) + denser)
     cand_list, banned_skipped = _filter_banned(cand_list, banned)

@@ -659,6 +659,34 @@ def _hunt_search_mode(
     return "explore"
 
 
+def _matrix_tfs_for_pass(
+    *,
+    base_tf: str,
+    held: int,
+    search_mode: str,
+    skip_heavy_search: bool,
+    live_week_ret: float,
+    hunt_exhausted: bool = False,
+) -> tuple[str, ...]:
+    """Which TFs the TF×lev matrix scores this pass.
+
+    Slimming to Live's TF when week≥15% was a speed hack that locked hunt onto
+    5m forever once Live cleared +15% — including during long HOLD streaks.
+    Stuck / explore / breakout / exhausted always get the full matrix.
+    Polish + strong Live may slim; champ-rescue short-circuit may slim only
+    when not stuck.
+    """
+    stuck = int(held) >= int(HUNT_STUCK_HELD)
+    need_breadth = stuck or bool(hunt_exhausted) or str(search_mode) in ("explore", "breakout")
+    if need_breadth:
+        return tuple(HUNT_MATRIX_TFS)
+    if skip_heavy_search:
+        return (str(base_tf),)
+    if float(live_week_ret or 0) >= 0.15 and str(search_mode) == "polish":
+        return (str(base_tf),)
+    return tuple(HUNT_MATRIX_TFS)
+
+
 def _cfg_dedupe_key(c: Config) -> tuple:
     return (
         c.strategy,
@@ -872,9 +900,11 @@ def _sample_cfg(base: Config, rng, *, wide: bool = False) -> Config:
     lev = int(rng.choice(lev_opts))
     n_open = int(rng.choice(open_opts))
     strat = str(rng.choice(strat_opts))
-    # Prefer faster clocks; wide samples full HUNT_TF_ALLOW under lev×tf matrix.
+    # Leave base TF often — explore used to stay on Live TF ~75% of the time,
+    # which re-scored the same 5m basin every pass once Live was 5m.
     tf = _tf_for_leverage(int(lev), str(base.timeframe))
-    if wide and rng.random() < 0.55 or (not wide) and rng.random() < 0.25:
+    jump_p = 0.55 if wide else 0.50
+    if rng.random() < jump_p:
         tf = str(rng.choice(list(HUNT_TF_ALLOW)))
         if not _lev_tf_allowed(int(lev), tf):
             tf = _tf_for_leverage(int(lev), tf)
