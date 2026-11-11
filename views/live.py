@@ -968,7 +968,16 @@ def live_panel() -> None:
 
         # Plain-English status — never dump internal jargon on the user
         paper_ok = age is not None and age < 180
-        just_upgraded = bool(last.get("improved")) and promote_tier in ("research", "confirmed")
+        just_upgraded = bool(last.get("improved")) and promote_tier in (
+            "research",
+            "confirmed",
+            "champion_rescue",
+        )
+        just_live_rotate = bool(last.get("improved")) and promote_tier in (
+            "silence_density",
+            "silence_rotate",
+            "matrix_escape",
+        )
         cool_left = None
         try:
             last_prom = state.get("research_promote_at")
@@ -988,6 +997,8 @@ def live_panel() -> None:
             status_tone = "busy"
         elif just_upgraded:
             status_label, status_tone = "Just switched to a better setup", "ok"
+        elif just_live_rotate:
+            status_label, status_tone = "Live/paper rotated · peak unchanged", "warn"
         elif met:
             status_label, status_tone = "Goals looking good — keep proving it", "ok"
         else:
@@ -1001,7 +1012,7 @@ def live_panel() -> None:
                 "ok" if paper_ok else "warn",
             ),
             (
-                f"Trading champion {lev}× · {tf}" if lev else f"Trading champion {tf}",
+                f"Trading Live {lev}× · {tf}" if lev else f"Trading Live {tf}",
                 "muted",
             ),
         ]
@@ -1014,6 +1025,8 @@ def live_panel() -> None:
             pass
         if just_upgraded:
             _chips.append(("New setup just applied", "ok"))
+        if just_live_rotate:
+            _chips.append(("Peak champion unchanged", "muted"))
         chip_row(_chips)
 
         # One human sentence — what it's doing next
@@ -1023,8 +1036,13 @@ def live_panel() -> None:
             )
         elif just_upgraded:
             st.caption(
-                "New settings are on the practice wallet. "
+                "New peak/champion settings are on the practice wallet. "
                 "Watching real paper P&L before changing again."
+            )
+        elif just_live_rotate:
+            st.caption(
+                "Live/paper book rotated (silence or matrix escape) — "
+                "peak champion was not raised. Paper follows Live, not peak."
             )
         elif week_ret >= 0:
             st.caption(
@@ -1171,11 +1189,12 @@ def live_panel() -> None:
                     else "champion book"
                 )
                 champ_tile = {
-                    "label": f"Champion · {_HOLDOUT}",
+                    "label": f"Peak champion · {_HOLDOUT}",
                     "value": f"${c_final:,.0f}",
                     "hint": (
                         f"{c_book} · ${start_eq:,.0f} → ${c_final:,.0f} ({c_ret:+.0%})"
                         + (f" · {c_span}" if c_span else "")
+                        + " · raise-only peak (silence does not change this)"
                     ),
                     "tone": (
                         "good" if c_ret >= week_goal
@@ -1185,12 +1204,13 @@ def live_panel() -> None:
 
         hero_stats = [
             {
-                "label": f"Champion (trading) · {_HOLDOUT}",
+                "label": f"Live / paper book · {_HOLDOUT}",
                 "value": f"${week_final:,.0f}",
                 "hint": (
                     f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
                     f"simulated from past candles · goal ≥ {week_goal:.0%} · "
-                    f"{week_n} trades in that holdout · this is what paper trades"
+                    f"{week_n} trades in that holdout · this is what paper trades "
+                    f"(may differ from peak champion)"
                 ),
                 "tone": week_tone,
             },
@@ -1355,52 +1375,33 @@ def live_panel() -> None:
                 f"Search attempts on Live are hunt passes, not trades."
             )
 
+        from moonshot.hunt.search_labels import (
+            holdout_column_name,
+            holdout_week_note,
+            matrix_scored_label,
+            what_happened_label,
+        )
+
+        _holdout_col = holdout_column_name(_HOLDOUT)
         section_header(
             "Recent searches",
-            "Newest first — did paper switch off the champion? (not every lev×TF cell tried)",
+            "Newest first — Live/paper book vs raise-only peak champion (not the same)",
         )
         st.caption(
-            "Paper should only trade the **champion**. "
-            "**Trading now** = that champion book (the only thing placing paper trades). "
-            "**Matrix scored** = other lev×TF/candidates hunt tested that pass and rejected. "
-            "Repeated 10×@5m means hunt did not find a new champion — not that it only searched 10×@5m."
+            "Paper trades the **Live / `.env` book**, not automatically the peak champion. "
+            "Silence/matrix escape can rotate Live without raising peak. "
+            "**Trading now** = Live lev×TF after that pass. "
+            "**Matrix scored** = full TF×lev cells tested that pass. "
+            "Repeated 10×@5m can mean HOLD, silence densify, or no peak raise — not 'only searched 5m'."
         )
         if held_streak >= 3:
             st.caption(
-                f"Last {held_streak} searches kept the same setup (score {score}/100). "
-                "That means nothing better was found — not a frozen screen."
+                f"Last {held_streak} searches did not raise peak (score {score}/100). "
+                "Live knobs may still have rotated — check What happened."
             )
 
-        def _matrix_scored_label(hrow: dict) -> str:
-            ladder = hrow.get("leverage_ladder") or []
-            if not isinstance(ladder, list) or not ladder:
-                tested_n = hrow.get("tested")
-                return f"{tested_n} knob ideas" if tested_n is not None else "—"
-            cells = []
-            tfs: set[str] = set()
-            levs: set[int] = set()
-            for cell in ladder:
-                try:
-                    lv = int(cell.get("leverage") or 0)
-                    tf = str(cell.get("timeframe") or cell.get("tf") or "")
-                except (TypeError, ValueError):
-                    continue
-                if not lv or not tf:
-                    continue
-                levs.add(lv)
-                tfs.add(tf)
-                cells.append(f"{lv}×@{tf}")
-            if not cells:
-                tested_n = hrow.get("tested")
-                return f"{tested_n} knob ideas" if tested_n is not None else "—"
-            lev_s = "/".join(f"{x}×" for x in sorted(levs))
-            tf_s = "/".join(sorted(tfs, key=lambda t: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(t, 9)))
-            tested_n = hrow.get("tested")
-            extra = f" · {tested_n} knob ideas" if tested_n is not None else ""
-            return f"{len(cells)} cells · {lev_s} × {tf_s}{extra}"
-
-        # Dedupe by generation (history can log explore+polish same gen)
-        seen_gen: set[int] = set()
+        # Dedupe key keeps silence + HOLD same gen visible (gen alone hid money truth).
+        seen_keys: set[tuple] = set()
         rows = []
         # In-progress pass first when history has not logged it yet
         try:
@@ -1425,57 +1426,26 @@ def live_panel() -> None:
                 "Trading now": "—",
                 "Score": "—",
                 "Win rate": "—",
-                f"{_HOLDOUT} (champion)": "—",
+                _holdout_col: "—",
                 "Avg profit": "—",
             })
-            seen_gen.add(int(running_gen))
+            seen_keys.add((int(running_gen), "running", True))
         for h in reversed(history):
             g = h.get("generation")
             try:
                 gi = int(g) if g is not None else None
             except (TypeError, ValueError):
                 gi = None
+            why_k = str(h.get("promote_reason") or h.get("promote_tier") or "")
+            key = (gi, why_k, bool(h.get("improved")))
             if gi is not None:
-                if gi in seen_gen:
+                if key in seen_keys:
                     continue
-                seen_gen.add(gi)
+                seen_keys.add(key)
             te = h.get("test_exp")
             w = h.get("win")
-            wr = h.get("week_return")
-            tested = h.get("tested")
-            why = str(h.get("promote_reason") or "")
-            if h.get("improved"):
-                result = (
-                    f"New champion deployed to paper ({why})"
-                    if why
-                    else "New champion deployed to paper"
-                )
-                week_note = (
-                    f"{float(wr):+.0%}" if wr is not None else "—"
-                )
-            elif tested is not None:
-                # Money truth: not applied ⇒ paper still on champion.
-                gate = str(h.get("material_why") or "").strip()
-                if gate and why not in ("", "baseline", "hold"):
-                    result = (
-                        f"Still champion · checked {tested} ideas · "
-                        f"no replace ({gate})"
-                    )
-                else:
-                    result = (
-                        f"Still champion · checked {tested} ideas · "
-                        "nothing beat champion"
-                    )
-                week_note = (
-                    f"{float(wr):+.0%} (champion unchanged)"
-                    if wr is not None else "—"
-                )
-            else:
-                result = "Still champion"
-                week_note = (
-                    f"{float(wr):+.0%} (champion unchanged)"
-                    if wr is not None else "—"
-                )
+            result = what_happened_label(h)
+            week_note = holdout_week_note(h)
             sc = h.get("score")
             lev = h.get("leverage")
             tf = h.get("timeframe") or "—"
@@ -1487,11 +1457,11 @@ def live_panel() -> None:
                 "Search #": h.get("generation"),
                 "When (UTC)": _fmt_utc(h.get("ts")),
                 "What happened": result,
-                "Matrix scored": _matrix_scored_label(h),
+                "Matrix scored": matrix_scored_label(h),
                 "Trading now": trading_now,
                 "Score": sc if sc is not None else "—",
                 "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                f"{_HOLDOUT} (champion)": week_note,
+                _holdout_col: week_note,
                 "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
             })
             if len(rows) >= 24:

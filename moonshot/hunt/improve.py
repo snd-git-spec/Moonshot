@@ -2650,6 +2650,11 @@ def _improve_once_impl(
             "knobs": knobs,
             "deployed_knobs": live_knobs,
             "leverage_ladder": leverage_ladder,
+            # Full TF×lev matrix for honest Recent searches (not by-lev 5m collapse).
+            "tf_lev_matrix": list(tf_lev_matrix_rows or []),
+            "matrix_tfs": sorted(
+                {str(r.get("tf")) for r in (tf_lev_matrix_rows or []) if r.get("tf")}
+            ),
         }
     )
     state["history"] = hist[-300:]
