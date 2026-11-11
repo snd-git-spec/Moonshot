@@ -44,6 +44,14 @@ def _parse_ts(value):
     return pd.to_datetime(value, utc=True, format="ISO8601", errors="coerce")
 
 
+def _fmt_utc(value) -> str:
+    """Compact UTC stamp for tables — empty if missing/unparseable."""
+    ts = _parse_ts(value)
+    if pd.isna(ts):
+        return "—"
+    return ts.strftime("%Y-%m-%d %H:%M")
+
+
 def _history_week_ret(row: dict) -> float | None:
     if not isinstance(row, dict):
         return None
@@ -1411,6 +1419,7 @@ def live_panel() -> None:
             mode = str(he.get("search_mode") or "search")
             rows.append({
                 "Search #": running_gen,
+                "When (UTC)": _fmt_utc(he.get("ts")),
                 "What happened": f"In progress · {mode}",
                 "Matrix scored": "running…",
                 "Trading now": "—",
@@ -1476,6 +1485,7 @@ def live_panel() -> None:
                 trading_now = str(tf)
             rows.append({
                 "Search #": h.get("generation"),
+                "When (UTC)": _fmt_utc(h.get("ts")),
                 "What happened": result,
                 "Matrix scored": _matrix_scored_label(h),
                 "Trading now": trading_now,
