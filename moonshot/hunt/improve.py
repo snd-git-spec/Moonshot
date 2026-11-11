@@ -1025,9 +1025,22 @@ def improve_once(
     # ---- Stage A: cheap BTC short-window week rank (defer full IS/OOS to B/C) ----
     stage_a: list = []
     thin_a: list = []
-    _stage_a_cands = [] if skip_heavy_search else list(cand_list)
+    # Live TF only in Stage A on the 2G droplet — explore TF jumps were
+    # re-fetching 15m/1h/4h books and OOMing before HOLD. Other TFs are
+    # already scored in the sequential matrix; B/C may still see survivors.
+    _live_tf_a = str(base.timeframe)
+    _stage_a_cands = (
+        [] if skip_heavy_search else [c for c in cand_list if str(c.timeframe) == _live_tf_a]
+    )
     if skip_heavy_search:
         log.info("champion short-circuit — skipping Stage A/B/C candidate search")
+    elif len(_stage_a_cands) < len(cand_list):
+        log.info(
+            "stage A Live-TF filter · %s · %d/%d candidates",
+            _live_tf_a,
+            len(_stage_a_cands),
+            len(cand_list),
+        )
     for cand in _stage_a_cands:
         tested += 1
         try:
