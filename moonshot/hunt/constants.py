@@ -464,10 +464,12 @@ def _live_feed(kind: str, message: str, **extra) -> None:
         # paper_tick must NOT clear busy during an active hunt pass
         if kind in ("improve_start", "paper_restart"):
             state["busy"] = True
-        elif kind in ("hold", "upgrade", "targets_met", "error", "autopilot_on"):
+        elif (
+            kind in ("hold", "upgrade", "targets_met", "error", "autopilot_on")
             # Do not clear busy while a pass_started_at is still open (abort/HOLD clears it).
-            if not state.get("pass_started_at"):
-                state["busy"] = False
+            and not state.get("pass_started_at")
+        ):
+            state["busy"] = False
 
     _update_autopilot_state(_mutate)
 

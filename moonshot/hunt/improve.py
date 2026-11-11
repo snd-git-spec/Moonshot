@@ -35,7 +35,6 @@ from moonshot.hunt.constants import (
     HUNT_DENSER_COOLDOWNS,
     HUNT_DENSER_MAX,
     HUNT_MATRIX_SOFT_CAP,
-    HUNT_MATRIX_TFS,
     HUNT_SILENCE_MAX_PEAK_GAP_PP,
     HUNT_SILENCE_ROTATE_ENABLED,
     HUNT_STUCK_SOFTEN_HELD,
@@ -257,10 +256,9 @@ def _improve_once_impl(
             st["pass_started_at"] = state.get("pass_started_at") or st.get("pass_started_at")
             st["busy"] = True
 
-        try:
+        with contextlib.suppress(Exception):
             _update_autopilot_state(_hb)
-        except Exception:
-            pass
+
     # Funnel hunt: confirm book (multi-coin) + scout book (BTC only).
     tf_s = str(base.timeframe)
     hunt_tier = "confirm" if hunt else "finalist"
