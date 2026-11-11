@@ -117,7 +117,6 @@ from moonshot.hunt.scoring import (
     _rank_matrix_rows_escape,
     _recent_eval,
     _matrix_tfs_for_pass,
-    _scale_bar_knobs_for_tf,
     _select_polish_base,
     _should_ban_week,
     _tf_lev_matrix_cfgs,
@@ -693,98 +692,110 @@ def improve_once(
                 search_mode,
                 float(base_week.get("ret") or 0) * 100,
             )
-        for _tf_warm in matrix_tfs:
-            _raw_for_tf(str(_tf_warm))
+        # One TF at a time — never hold 5m+15m+1h+4h OHLCV in RAM together on
+        # the 2G droplet (that OOMed mid-pass and froze Recent searches).
         _matrix_cfgs = [
             c for c in _tf_lev_matrix_cfgs(base) if str(c.timeframe) in {str(t) for t in matrix_tfs}
         ]
         matrix_cells = [_freeze_risk_matrix(base, c) for c in _matrix_cfgs]
         hard_rows: list[dict] = []
         cell_by_key: dict[tuple[str, int], Config] = {}
+        cells_by_tf: dict[str, list[Config]] = {}
         for cand in matrix_cells:
-            key = (str(cand.timeframe), int(cand.leverage))
-            cell_by_key[key] = cand
-            row: dict = {
-                "leverage": int(cand.leverage),
-                "tf": str(cand.timeframe),
-                "strategy": str(cand.strategy),
-                "skip": False,
-                "dense_ok": False,
-                "robust_ok": False,
-                "week_ret": None,
-                "prior_ret": None,
-                "test_ret": None,
-                "soft_ret": None,
-                "week_trades": 0,
-            }
-            try:
-                use_raw = _raw_for_tf(cand.timeframe)
-                if not use_raw:
-                    row["skip"] = True
-                    row["why"] = "no_raw"
-                    hard_rows.append(row)
-                    continue
-                data = _prepare_cached(use_raw, cand, feat_cache)
+            cells_by_tf.setdefault(str(cand.timeframe), []).append(cand)
+            cell_by_key[(str(cand.timeframe), int(cand.leverage))] = cand
 
-                # Same calendar end as Live scorecard (like-for-like). Skip only if
-                # this TF's data does not cover the holdout start.
-                # Compare coverage in naive UTC; evaluate week with end=t1 so tz
-                # matches bar indexes (naive end → empty/zero week on UTC bars).
-                def _as_naive_utc(ts) -> pd.Timestamp:
-                    out = pd.Timestamp(ts)
-                    if getattr(out, "tzinfo", None) is not None:
-                        out = out.tz_convert("UTC").tz_localize(None)
-                    return out
+        def _as_naive_utc(ts) -> pd.Timestamp:
+            out = pd.Timestamp(ts)
+            if getattr(out, "tzinfo", None) is not None:
+                out = out.tz_convert("UTC").tz_localize(None)
+            return out
 
-                last_bar_n = _as_naive_utc(max(sd.bars[-1].Index for sd in data.values()))
-                ho_start_n = _as_naive_utc(t1) - pd.Timedelta(days=int(WEEK_DAYS))
-                if last_bar_n < ho_start_n:
-                    row["skip"] = True
-                    row["why"] = "truncated_holdout"
-                    hard_rows.append(row)
-                    continue
-                ci, co = _eval_cfg(data, cand, split, end=fit_end)
-                cweek = _dual_week_eval(data, cand, end=t1)
-                span_days = float(WEEK_DAYS)
-                span_s = str(cweek.get("span") or "")
+        def _prune_tf(tf_drop: str) -> None:
+            if str(tf_drop) == str(base.timeframe):
+                return
+            raw_by_tf.pop(str(tf_drop), None)
+            scout_raw_by_tf.pop(str(tf_drop), None)
+            _stats = feat_cache.pop("_stats", None)
+            feat_cache.clear()
+            if _stats is not None:
+                feat_cache["_stats"] = _stats
+            gc.collect()
+
+        for tf_key in matrix_tfs:
+            tf_s_m = str(tf_key)
+            for cand in cells_by_tf.get(tf_s_m, []):
+                key = (str(cand.timeframe), int(cand.leverage))
+                row: dict = {
+                    "leverage": int(cand.leverage),
+                    "tf": str(cand.timeframe),
+                    "strategy": str(cand.strategy),
+                    "skip": False,
+                    "dense_ok": False,
+                    "robust_ok": False,
+                    "week_ret": None,
+                    "prior_ret": None,
+                    "test_ret": None,
+                    "soft_ret": None,
+                    "week_trades": 0,
+                }
                 try:
-                    if "→" in span_s:
-                        a, b = [x.strip() for x in span_s.split("→", 1)]
-                        span_days = (pd.Timestamp(b) - pd.Timestamp(a)).total_seconds() / 86400.0
-                except Exception:
+                    use_raw = _raw_for_tf(cand.timeframe)
+                    if not use_raw:
+                        row["skip"] = True
+                        row["why"] = "no_raw"
+                        hard_rows.append(row)
+                        continue
+                    data = _prepare_cached(use_raw, cand, feat_cache)
+                    # Same calendar end as Live scorecard (like-for-like).
+                    last_bar_n = _as_naive_utc(max(sd.bars[-1].Index for sd in data.values()))
+                    ho_start_n = _as_naive_utc(t1) - pd.Timedelta(days=int(WEEK_DAYS))
+                    if last_bar_n < ho_start_n:
+                        row["skip"] = True
+                        row["why"] = "truncated_holdout"
+                        hard_rows.append(row)
+                        continue
+                    ci, co = _eval_cfg(data, cand, split, end=fit_end)
+                    cweek = _dual_week_eval(data, cand, end=t1)
                     span_days = float(WEEK_DAYS)
-                # Preserve legitimate 0.0 returns (do not coalesce with `or 0` after None-check)
-                _wr = cweek.get("ret")
-                row["week_ret"] = float(_wr) if _wr is not None else 0.0
-                row["prior_ret"] = cweek.get("prior_ret")
-                row["week_trades"] = int(cweek.get("trades") or 0)
-                row["test_ret"] = float(co.total_return)
-                row["span_days"] = span_days
-                if not _holdout_span_ok(span_days):
-                    row["skip"] = True
-                    row["why"] = "truncated_holdout"
+                    span_s = str(cweek.get("span") or "")
+                    try:
+                        if "→" in span_s:
+                            a, b = [x.strip() for x in span_s.split("→", 1)]
+                            span_days = (
+                                pd.Timestamp(b) - pd.Timestamp(a)
+                            ).total_seconds() / 86400.0
+                    except Exception:
+                        span_days = float(WEEK_DAYS)
+                    _wr = cweek.get("ret")
+                    row["week_ret"] = float(_wr) if _wr is not None else 0.0
+                    row["prior_ret"] = cweek.get("prior_ret")
+                    row["week_trades"] = int(cweek.get("trades") or 0)
+                    row["test_ret"] = float(co.total_return)
+                    row["span_days"] = span_days
+                    if not _holdout_span_ok(span_days):
+                        row["skip"] = True
+                        row["why"] = "truncated_holdout"
+                        hard_rows.append(row)
+                        continue
+                    dense_ok = _lev_density_ok(
+                        int(cand.leverage),
+                        cweek,
+                        dual_ok=bool(cweek.get("dual_ok")),
+                        tf=str(cand.timeframe),
+                    )
+                    row["dense_ok"] = bool(dense_ok)
+                    # Serializable only — soft pass reloads top-N (keeps RAM flat).
                     hard_rows.append(row)
-                    continue
-                dense_ok = _lev_density_ok(
-                    int(cand.leverage),
-                    cweek,
-                    dual_ok=bool(cweek.get("dual_ok")),
-                    tf=str(cand.timeframe),
-                )
-                row["dense_ok"] = bool(dense_ok)
-                row["_ci"] = ci
-                row["_co"] = co
-                row["_cweek"] = cweek
-                row["_cand"] = cand
-                row["_data"] = data
-                hard_rows.append(row)
-            except Exception as e:
-                row["skip"] = True
-                row["why"] = f"eval_fail:{e}"
-                hard_rows.append(row)
-                log.warning("matrix cell %sx@%s failed: %s", cand.leverage, cand.timeframe, e)
+                except Exception as e:
+                    row["skip"] = True
+                    row["why"] = f"eval_fail:{e}"
+                    hard_rows.append(row)
+                    log.warning("matrix cell %sx@%s failed: %s", cand.leverage, cand.timeframe, e)
+            _prune_tf(tf_s_m)
+            log.info("matrix hard done · tf=%s · rows=%d", tf_s_m, len(cells_by_tf.get(tf_s_m, [])))
 
-        # Soft+robust only top-N density-ok by hard week_ret
+        # Soft+robust only top-N density-ok by hard week_ret (reload per cell).
         ranked_hard = sorted(
             [r for r in hard_rows if not r.get("skip") and r.get("dense_ok")],
             key=lambda r: float(r.get("week_ret") or -999),
@@ -796,15 +807,14 @@ def improve_once(
             if row.get("skip") or key not in soft_keys:
                 if not row.get("skip") and not row.get("dense_ok"):
                     row["why"] = row.get("why") or "sparse"
-                # strip temp objects before persist
-                for k in ("_ci", "_co", "_cweek", "_cand", "_data"):
-                    row.pop(k, None)
                 tf_lev_matrix_rows.append(row)
                 continue
             try:
-                cand = row["_cand"]
-                data = row["_data"]
-                ci, co, cweek = row["_ci"], row["_co"], row["_cweek"]
+                cand = cell_by_key[key]
+                use_raw = _raw_for_tf(cand.timeframe)
+                data = _prepare_cached(use_raw, cand, feat_cache)
+                ci, co = _eval_cfg(data, cand, split, end=fit_end)
+                cweek = _dual_week_eval(data, cand, end=t1)
                 cs = _eval_soft_oos(data, cand, split, end=fit_end)
                 soft_ret = float(cs.total_return) if cs is not None else float(co.total_return)
                 row["soft_ret"] = soft_ret
@@ -813,7 +823,6 @@ def improve_once(
                 row["why"] = rwhy if not rok else "period_robust"
                 if rok and _is_screenable(ci, co) and _is_climb_ok(ci, co, cs, base_i, base_o):
                     _consider(cand, ci, co, cs, "tf_lev_matrix")
-                # best_by_tf memory (robust only)
                 if rok:
                     _best_by_tf_raise(
                         state,
@@ -829,8 +838,7 @@ def improve_once(
                 row["robust_ok"] = False
                 row["why"] = f"soft_fail:{e}"
             finally:
-                for k in ("_ci", "_co", "_cweek", "_cand", "_data"):
-                    row.pop(k, None)
+                _prune_tf(str(row.get("tf") or ""))
             tf_lev_matrix_rows.append(row)
 
         matrix_winner_row = _rank_matrix_rows(tf_lev_matrix_rows)
@@ -961,56 +969,41 @@ def improve_once(
             cand_list.append(seed)
         except Exception:
             pass
-    # denser when stuck / explore / breakout.
-    # Full knob grid on Live TF only (~81). Cross-TF is a *thin* seed per
-    # other candle (strat×lev) — NOT 81×4 TFs. The full cartesian product
-    # OOMs the 1700M droplet cgroup mid Stage-A (~every 8–10 min) so passes
-    # never finish and Recent searches freezes on the last HOLD.
+    # denser when stuck / explore / breakout: Live-TF knob grid only (~81).
+    # Cross-TF diversity = sequential TF×lev matrix + explore TF jumps.
+    # Do not inject other-TF denser seeds (Stage A reloads full books → OOM).
     denser: list[Config] = []
     if (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
         _live_tf = str(polish_base.timeframe)
-
-        def _dense_cell(
-            base_cfg: Config, *, st: str, lev: int, adx: float, cd: int, tf: str
-        ) -> Config:
-            return replace(
-                base_cfg,
-                strategy=str(st),
-                leverage=int(lev),
-                timeframe=str(tf),
-                adx_enter=float(adx),
-                adx_exit=float(max(10.0, adx - 5)),
-                require_squeeze=False,
-                require_rising_adx=False,
-                cooldown_bars=int(cd),
-                volume_multiplier=1.1,
-                mom_lookback=8,
-                mom_min_atr=0.35,
-                max_account_leverage=float(max(lev, float(polish_base.max_account_leverage))),
-                max_net_leverage=float(max(lev, float(polish_base.max_net_leverage))),
-            )
-
         for st in HUNT_STRATEGIES:
             for lev in (5, 7, 10):
                 for adx in (14.0, 16.0, 18.0):
                     for cd in (0, 1, 2):
                         denser.append(
-                            _dense_cell(polish_base, st=st, lev=lev, adx=adx, cd=cd, tf=_live_tf)
+                            replace(
+                                polish_base,
+                                strategy=str(st),
+                                leverage=int(lev),
+                                timeframe=_live_tf,
+                                adx_enter=float(adx),
+                                adx_exit=float(max(10.0, adx - 5)),
+                                require_squeeze=False,
+                                require_rising_adx=False,
+                                cooldown_bars=int(cd),
+                                volume_multiplier=1.1,
+                                mom_lookback=8,
+                                mom_min_atr=0.35,
+                                max_account_leverage=float(
+                                    max(lev, float(polish_base.max_account_leverage))
+                                ),
+                                max_net_leverage=float(
+                                    max(lev, float(polish_base.max_net_leverage))
+                                ),
+                            )
                         )
-        for _dtf in HUNT_MATRIX_TFS:
-            if str(_dtf) == _live_tf:
-                continue
-            scaled = _scale_bar_knobs_for_tf(polish_base, str(_dtf))
-            for st in HUNT_STRATEGIES:
-                for lev in (5, 7, 10):
-                    denser.append(_dense_cell(scaled, st=st, lev=lev, adx=16.0, cd=1, tf=str(_dtf)))
-        log.info(
-            "denser inject · live_tf=%s · n=%d (live_grid + cross_tf seeds)",
-            _live_tf,
-            len(denser),
-        )
+        log.info("denser inject · live_tf=%s · n=%d", _live_tf, len(denser))
     # Dedupe with polish_base as freeze anchor so matrix lev/tf survive
     cand_list = _dedupe_cfgs_matrix(polish_base, list(cand_list) + denser)
     cand_list, banned_skipped = _filter_banned(cand_list, banned)
@@ -1054,6 +1047,12 @@ def improve_once(
         except Exception as e:
             log.warning("stage A failed: %s", e)
             continue
+        finally:
+            # Explore TF jumps must not accumulate every candle size in RAM.
+            _ctf = str(getattr(cand, "timeframe", "") or "")
+            if _ctf and _ctf != str(base.timeframe):
+                raw_by_tf.pop(_ctf, None)
+                scout_raw_by_tf.pop(_ctf, None)
         n_tr = int(cheap.get("trades") or 0)
         row = (
             float(cheap.get("ret") or -999),
