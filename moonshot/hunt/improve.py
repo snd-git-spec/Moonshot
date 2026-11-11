@@ -62,6 +62,7 @@ from moonshot.hunt.constants import (
     _load_autopilot_state,
     _patch_env,
     _save_autopilot_state,
+    _update_autopilot_state,
     _utc_now,
     _week_delta_needed,
     autopilot_frozen,
@@ -211,30 +212,45 @@ def _improve_once_impl(
         held_streak=held,
     )
     # Pass lifecycle — finish signal for MemoryMax / OOM-restart detection.
-    force_slim = bool(state.pop("force_matrix_slim", False))
-    recover_reason = state.pop("hunt_recover_reason", None)
-    if force_slim and not recover_reason:
-        recover_reason = "pass_stuck"
-    _pass_now = _utc_now().isoformat()
-    state["pass_started_at"] = _pass_now
-    state["pass_heartbeat_at"] = _pass_now
+    # Flock update so _live_feed / watchdog cannot clobber pass_started_at.
+    _pass_box: dict = {"force_slim": False, "recover_reason": None, "ts": ""}
+
+    def _start_pass(st: dict) -> None:
+        _pass_box["force_slim"] = bool(st.pop("force_matrix_slim", False))
+        _pass_box["recover_reason"] = st.pop("hunt_recover_reason", None)
+        if _pass_box["force_slim"] and not _pass_box["recover_reason"]:
+            _pass_box["recover_reason"] = "pass_stuck"
+        ts = _utc_now().isoformat()
+        _pass_box["ts"] = ts
+        st["pass_started_at"] = ts
+        st["pass_heartbeat_at"] = ts
+        st["busy"] = True
+
+    _update_autopilot_state(_start_pass)
+    force_slim = bool(_pass_box["force_slim"])
+    recover_reason = _pass_box["recover_reason"]
+    state["pass_started_at"] = _pass_box["ts"]
+    state["pass_heartbeat_at"] = _pass_box["ts"]
     state["busy"] = True
+    state.pop("force_matrix_slim", None)
+    state.pop("hunt_recover_reason", None)
     if force_slim:
         log.info(
             "force_matrix_slim · reason=%s · Live TF only (lev 5/7/10 retained)",
             recover_reason,
         )
-    _save_autopilot_state(state)
 
     def _pass_heartbeat() -> None:
         ts = _utc_now().isoformat()
         state["pass_heartbeat_at"] = ts
+
+        def _hb(st: dict) -> None:
+            st["pass_heartbeat_at"] = ts
+            st["pass_started_at"] = state.get("pass_started_at") or st.get("pass_started_at")
+            st["busy"] = True
+
         try:
-            st_hb = _load_autopilot_state()
-            st_hb["pass_heartbeat_at"] = ts
-            if st_hb.get("pass_started_at"):
-                st_hb["pass_started_at"] = state.get("pass_started_at")
-            _save_autopilot_state(st_hb)
+            _update_autopilot_state(_hb)
         except Exception:
             pass
     # Funnel hunt: confirm book (multi-coin) + scout book (BTC only).
@@ -2618,7 +2634,22 @@ def _improve_once_impl(
         }
     )
     state["history"] = hist[-300:]
-    _save_autopilot_state(state)
+
+    def _finish_save(st: dict) -> None:
+        # Preserve recover flags the watchdog set mid-pass for the *next* pass.
+        keep_slim = bool(st.get("force_matrix_slim"))
+        keep_reason = st.get("hunt_recover_reason")
+        st.clear()
+        st.update(state)
+        if keep_slim:
+            st["force_matrix_slim"] = True
+            if keep_reason:
+                st["hunt_recover_reason"] = keep_reason
+        st.pop("pass_started_at", None)
+        st.pop("pass_heartbeat_at", None)
+        st["busy"] = False
+
+    _update_autopilot_state(_finish_save)
     with contextlib.suppress(Exception):
         Persistence(str(DB_PATH), mode="paper").log_event(
             _utc_now(),

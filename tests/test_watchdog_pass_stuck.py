@@ -11,10 +11,35 @@ def _iso(hours_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 
 
-def test_watchdog_sets_force_slim_on_no_finish(tmp_path, monkeypatch):
+def _patch_state_io(monkeypatch, disk: dict):
+    """Patch constants load/save used by flock _update_autopilot_state."""
+    import moonshot.hunt.constants as const
     from moonshot.hunt import autopilot as ap
 
-    state = {
+    def _load():
+        return dict(disk)
+
+    def _save(st):
+        disk.clear()
+        disk.update(st)
+
+    def _update(mutator):
+        st = _load()
+        mutator(st)
+        _save(st)
+        return st
+
+    monkeypatch.setattr(const, "_load_autopilot_state", _load)
+    monkeypatch.setattr(const, "_save_autopilot_state", _save)
+    monkeypatch.setattr(const, "_update_autopilot_state", _update)
+    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
+    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
+    monkeypatch.setattr(ap, "_update_autopilot_state", _update)
+    return ap
+
+
+def test_watchdog_sets_force_slim_on_no_finish(tmp_path, monkeypatch):
+    disk = {
         "mode": "hunt",
         "busy": True,
         "started_at": _iso(0.1),
@@ -29,25 +54,20 @@ def test_watchdog_sets_force_slim_on_no_finish(tmp_path, monkeypatch):
         "history": [],
         "pending_champion_rescue": False,
     }
-    saved = {}
-
-    monkeypatch.setattr(ap, "_load_autopilot_state", lambda: state)
+    ap = _patch_state_io(monkeypatch, disk)
     monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("momentum_15", "5m", "10"))
-    monkeypatch.setattr(ap, "_save_autopilot_state", lambda st: saved.update(st))
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
     monkeypatch.setattr(ap, "recent_oom_hint", lambda: False)
 
     out = ap._run_scoreboard_watchdog()
     assert out["critical"] is True
-    assert state["force_matrix_slim"] is True
-    assert state["hunt_recover_reason"] in ("no_finish", "pass_stuck", "oom")
+    assert disk["force_matrix_slim"] is True
+    assert disk["hunt_recover_reason"] in ("no_finish", "pass_stuck", "oom")
     assert any("HUNT_NO_FINISH" in a for a in out["alerts"])
 
 
 def test_watchdog_oom_hint_sets_reason_oom(monkeypatch):
-    from moonshot.hunt import autopilot as ap
-
-    state = {
+    disk = {
         "mode": "hunt",
         "busy": True,
         "last_improve_at": _iso(float(HUNT_STALE_FINISH_HOURS) + 2.0),
@@ -57,33 +77,19 @@ def test_watchdog_oom_hint_sets_reason_oom(monkeypatch):
         "live_deployed": {},
         "history": [],
     }
-    saved = {}
-
-    def _load():
-        return dict(state)
-
-    def _save(st):
-        saved.clear()
-        saved.update(st)
-        state.clear()
-        state.update(st)
-
-    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
+    ap = _patch_state_io(monkeypatch, disk)
     monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("", "", ""))
-    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
     monkeypatch.setattr(ap, "recent_oom_hint", lambda: True)
 
     out = ap._run_scoreboard_watchdog()
     assert out["critical"] is True
-    assert saved["hunt_recover_reason"] == "oom"
-    assert saved["force_matrix_slim"] is True
+    assert disk["hunt_recover_reason"] == "oom"
+    assert disk["force_matrix_slim"] is True
 
 
 def test_watchdog_save_preserves_pass_started_at(monkeypatch):
     """Regression: watchdog must not clobber improve_once pass lifecycle fields."""
-    from moonshot.hunt import autopilot as ap
-
     disk = {
         "mode": "hunt",
         "busy": True,
@@ -96,17 +102,8 @@ def test_watchdog_save_preserves_pass_started_at(monkeypatch):
         "history": [],
         "generation": 1904,
     }
-
-    def _load():
-        return dict(disk)
-
-    def _save(st):
-        disk.clear()
-        disk.update(st)
-
-    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
+    ap = _patch_state_io(monkeypatch, disk)
     monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("", "", ""))
-    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
     monkeypatch.setattr(ap, "recent_oom_hint", lambda: False)
 

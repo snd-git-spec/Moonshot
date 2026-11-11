@@ -35,6 +35,7 @@ from moonshot.hunt.constants import (
     _load_autopilot_state,
     _pct_of_risk_msg,
     _save_autopilot_state,
+    _update_autopilot_state,
     autopilot_frozen,
 )
 from moonshot.hunt.scoring import (
@@ -177,7 +178,7 @@ def _run_scoreboard_watchdog() -> dict:
             alerts.append(msg)
             log.critical("SCOREBOARD WATCHDOG · %s", msg)
 
-    st["scoreboard_watchdog"] = {
+    wd = {
         "ts": _utc_now().isoformat(),
         "critical": critical,
         "alerts": alerts[:8],
@@ -189,23 +190,24 @@ def _run_scoreboard_watchdog() -> dict:
             "week_ret": champ_week_f,
         },
     }
-    # Merge onto latest disk state — do not clobber mid-pass fields written by improve_once.
-    patch = {
-        "scoreboard_watchdog": st["scoreboard_watchdog"],
-        "pending_champion_rescue": st.get("pending_champion_rescue"),
-        "champ_trail_streak": st.get("champ_trail_streak"),
-    }
-    if st.get("force_matrix_slim"):
-        patch["force_matrix_slim"] = True
-        patch["hunt_recover_reason"] = st.get("hunt_recover_reason")
-    latest = _load_autopilot_state()
-    latest.update({k: v for k, v in patch.items() if v is not None or k == "pending_champion_rescue"})
-    if st.get("force_matrix_slim"):
-        latest["force_matrix_slim"] = True
-        if st.get("hunt_recover_reason"):
-            latest["hunt_recover_reason"] = st["hunt_recover_reason"]
-    _save_autopilot_state(latest)
-    return latest["scoreboard_watchdog"]
+    want_slim = bool(st.get("force_matrix_slim"))
+    want_reason = st.get("hunt_recover_reason")
+    want_pending = st.get("pending_champion_rescue")
+    want_trail = st.get("champ_trail_streak")
+
+    def _patch(latest: dict) -> None:
+        latest["scoreboard_watchdog"] = wd
+        if "pending_champion_rescue" in st:
+            latest["pending_champion_rescue"] = want_pending
+        if "champ_trail_streak" in st:
+            latest["champ_trail_streak"] = want_trail
+        if want_slim:
+            latest["force_matrix_slim"] = True
+            if want_reason:
+                latest["hunt_recover_reason"] = want_reason
+
+    latest = _update_autopilot_state(_patch)
+    return latest.get("scoreboard_watchdog") or wd
 
 
 class PaperSupervisor:

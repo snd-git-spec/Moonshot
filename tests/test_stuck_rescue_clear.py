@@ -19,9 +19,13 @@ def test_different_adx_is_not_same_book():
 
 
 def test_watchdog_clears_stuck_pending_when_env_matches_champ(tmp_path, monkeypatch):
+    import moonshot.hunt.constants as const
     from moonshot.hunt import autopilot as ap
 
-    state = {
+    disk = {
+        "mode": "hunt",
+        "busy": False,
+        "last_improve_at": "2026-11-11T11:00:00+00:00",
         "pending_champion_rescue": True,
         "champ_trail_streak": 3,
         "champion": {
@@ -30,15 +34,33 @@ def test_watchdog_clears_stuck_pending_when_env_matches_champ(tmp_path, monkeypa
         },
         "live_deployed": {"week_ret": 0.25},
         "history": [],
+        "hunt_event": {"kind": "hold", "ts": "2026-11-11T11:00:00+00:00"},
     }
-    saved = {}
 
-    monkeypatch.setattr(ap, "_load_autopilot_state", lambda: state)
+    def _load():
+        return dict(disk)
+
+    def _save(st):
+        disk.clear()
+        disk.update(st)
+
+    def _update(mutator):
+        st = _load()
+        mutator(st)
+        _save(st)
+        return st
+
+    monkeypatch.setattr(const, "_load_autopilot_state", _load)
+    monkeypatch.setattr(const, "_save_autopilot_state", _save)
+    monkeypatch.setattr(const, "_update_autopilot_state", _update)
+    monkeypatch.setattr(ap, "_load_autopilot_state", _load)
+    monkeypatch.setattr(ap, "_save_autopilot_state", _save)
+    monkeypatch.setattr(ap, "_update_autopilot_state", _update)
     monkeypatch.setattr(ap, "_env_book_fingerprint", lambda: ("momentum_15", "5m", "10"))
-    monkeypatch.setattr(ap, "_save_autopilot_state", lambda st: saved.update(st))
     monkeypatch.setattr(ap, "_live_feed", lambda *a, **k: None)
+    monkeypatch.setattr(ap, "recent_oom_hint", lambda: False)
 
     out = ap._run_scoreboard_watchdog()
-    assert state["pending_champion_rescue"] is False
-    assert state["champ_trail_streak"] == 0
+    assert disk["pending_champion_rescue"] is False
+    assert disk["champ_trail_streak"] == 0
     assert out["critical"] is False

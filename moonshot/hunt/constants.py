@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 
@@ -411,6 +412,18 @@ def _save_autopilot_state(state: dict) -> None:
             pass
 
 
+def _update_autopilot_state(mutator: Callable[[dict], None]) -> dict:
+    """Load-modify-save under flock so live_feed / hunt / watchdog cannot clobber."""
+    lock_path = AUTOPILOT_STATE.with_name(".moonshot_autopilot.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        st = _load_autopilot_state()
+        mutator(st)
+        _save_autopilot_state(st)
+        return st
+
+
 def _live_feed(kind: str, message: str, **extra) -> None:
     """Append one clean line for the dashboard Live page."""
     row = {"ts": _utc_now().isoformat(), "kind": kind, "message": message, **extra}
@@ -423,25 +436,28 @@ def _live_feed(kind: str, message: str, **extra) -> None:
             LIVE_FEED.write_text("\n".join(lines) + "\n")
     except Exception:
         pass
-    state = _load_autopilot_state()
-    # Paper heartbeat stays under state["live"]. Hunt/search events must NOT
-    # overwrite it (that blanked bars_seen/setups and made Live look idle/wrong).
-    if kind in ("paper_tick", "paper_restart"):
-        state["live"] = row
-    elif kind in ("open", "close", "setup", "reject"):
-        # Keep last paper snapshot; only refresh ts/message hints
-        live = dict(state.get("live") or {})
-        live["last_trade_event"] = row
-        live["ts"] = row.get("ts") or live.get("ts")
-        state["live"] = live
-    else:
-        state["hunt_event"] = row
-    # paper_tick must NOT clear busy during an active hunt pass
-    if kind in ("improve_start", "paper_restart"):
-        state["busy"] = True
-    elif kind in ("hold", "upgrade", "targets_met", "error", "autopilot_on"):
-        state["busy"] = False
-    _save_autopilot_state(state)
+
+    def _mutate(state: dict) -> None:
+        # Paper heartbeat stays under state["live"]. Hunt/search events must NOT
+        # overwrite it (that blanked bars_seen/setups and made Live look idle/wrong).
+        if kind in ("paper_tick", "paper_restart"):
+            state["live"] = row
+        elif kind in ("open", "close", "setup", "reject"):
+            live = dict(state.get("live") or {})
+            live["last_trade_event"] = row
+            live["ts"] = row.get("ts") or live.get("ts")
+            state["live"] = live
+        else:
+            state["hunt_event"] = row
+        # paper_tick must NOT clear busy during an active hunt pass
+        if kind in ("improve_start", "paper_restart"):
+            state["busy"] = True
+        elif kind in ("hold", "upgrade", "targets_met", "error", "autopilot_on"):
+            # Do not clear busy while a pass_started_at is still open (abort/HOLD clears it).
+            if not state.get("pass_started_at"):
+                state["busy"] = False
+
+    _update_autopilot_state(_mutate)
 
 
 def _env_book_fingerprint() -> tuple[str, str, str]:

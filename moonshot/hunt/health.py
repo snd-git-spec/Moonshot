@@ -11,8 +11,7 @@ from moonshot.hunt.constants import (
     HUNT_PASS_MAX_HOURS,
     HUNT_STALE_FINISH_HOURS,
     HUNT_TERMINAL_GRACE_MIN,
-    _load_autopilot_state,
-    _save_autopilot_state,
+    _update_autopilot_state,
     _utc_now,
 )
 
@@ -143,7 +142,6 @@ def record_pass_abort(
     recover: bool = True,
 ) -> dict:
     """Write a finish record after improve_once raises — never leave last_improve frozen."""
-    state = _load_autopilot_state()
     ts = _utc_now().isoformat()
     err_s = str(error)
     decision = {
@@ -157,17 +155,20 @@ def record_pass_abort(
         "abort": True,
         "abort_error": err_s[:500],
     }
-    state["last_improve"] = decision
-    state["last_improve_at"] = ts
-    state["generation"] = int(generation)
-    state["improve_passes"] = int(state.get("improve_passes", 0)) + 1
-    state["busy"] = False
-    state.pop("pass_started_at", None)
-    state.pop("pass_heartbeat_at", None)
-    if recover:
-        state["force_matrix_slim"] = True
-        if not state.get("hunt_recover_reason"):
-            state["hunt_recover_reason"] = "pass_stuck"
-    _save_autopilot_state(state)
+
+    def _mutate(state: dict) -> None:
+        state["last_improve"] = decision
+        state["last_improve_at"] = ts
+        state["generation"] = int(generation)
+        state["improve_passes"] = int(state.get("improve_passes", 0)) + 1
+        state["busy"] = False
+        state.pop("pass_started_at", None)
+        state.pop("pass_heartbeat_at", None)
+        if recover:
+            state["force_matrix_slim"] = True
+            if not state.get("hunt_recover_reason"):
+                state["hunt_recover_reason"] = "pass_stuck"
+
+    _update_autopilot_state(_mutate)
     log.error("PASS ABORT recorded · gen=%s · %s", generation, err_s)
     return decision
