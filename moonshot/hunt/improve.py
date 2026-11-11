@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -884,6 +885,21 @@ def improve_once(
                 )
             )[:500],
         )
+        # Drop non-Live TF OHLCV / features before Stage A — full matrix holds
+        # 5m+15m+1h+4h in RAM and was OOM-killing the 1.7–2.8G cgroup mid-search.
+        keep_tfs = {str(base.timeframe)}
+        if matrix_winner_cfg is not None:
+            keep_tfs.add(str(matrix_winner_cfg.timeframe))
+        for store in (raw_by_tf, scout_raw_by_tf):
+            for k in list(store):
+                if str(k) not in keep_tfs:
+                    store.pop(k, None)
+        _stats = feat_cache.get("_stats")
+        feat_cache.clear()
+        if _stats is not None:
+            feat_cache["_stats"] = _stats
+        gc.collect()
+        log.info("tf cache pruned · keep=%s", sorted(keep_tfs))
     except Exception as e:
         log.warning("tf×lev matrix failed: %s", e)
         tf_lev_matrix_rows = []

@@ -35,13 +35,16 @@ rsync -az --delete \
 ssh -i "$KEY" -o BatchMode=yes "root@$HOST" bash -s <<EOF
 set -euo pipefail
 cd $REMOTE
-# Raise memory headroom — hunt+streamlit previously peaked ~1.7G and hunt died silently.
+# Hunt multi-TF matrix + paper + streamlit need more than 1.7G; 1700M cgroup
+# OOM-killed autopilot mid-pass every ~8–10 min (Recent searches froze).
+# Droplet has ~2G RAM + 2G swap — allow swap rather than silent kills.
 mkdir -p /etc/systemd/system/moonshot.service.d
 cat >/etc/systemd/system/moonshot.service.d/override.conf <<'OVR'
 [Service]
 Environment=PORT=8501
 Environment=STREAMLIT_SERVER_ADDRESS=127.0.0.1
-MemoryMax=1700M
+MemoryMax=2800M
+MemorySwapMax=infinity
 OVR
 # Clamp corrupt generation / clear stuck busy from dead hunt mid-pass.
 python3 - <<'PY'
