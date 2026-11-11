@@ -998,7 +998,7 @@ def live_panel() -> None:
         elif just_upgraded:
             status_label, status_tone = "Just switched to a better setup", "ok"
         elif just_live_rotate:
-            status_label, status_tone = "Live/paper rotated · peak unchanged", "warn"
+            status_label, status_tone = "No better setup · paper tweaked while waiting", "warn"
         elif met:
             status_label, status_tone = "Goals looking good — keep proving it", "ok"
         else:
@@ -1012,7 +1012,7 @@ def live_panel() -> None:
                 "ok" if paper_ok else "warn",
             ),
             (
-                f"Trading Live {lev}× · {tf}" if lev else f"Trading Live {tf}",
+                f"Paper trading {lev}× · {tf}" if lev else f"Paper trading {tf}",
                 "muted",
             ),
         ]
@@ -1025,8 +1025,6 @@ def live_panel() -> None:
             pass
         if just_upgraded:
             _chips.append(("New setup just applied", "ok"))
-        if just_live_rotate:
-            _chips.append(("Peak champion unchanged", "muted"))
         chip_row(_chips)
 
         # One human sentence — what it's doing next
@@ -1036,13 +1034,13 @@ def live_panel() -> None:
             )
         elif just_upgraded:
             st.caption(
-                "New peak/champion settings are on the practice wallet. "
+                "A better setup is on the practice wallet. "
                 "Watching real paper P&L before changing again."
             )
         elif just_live_rotate:
             st.caption(
-                "Live/paper book rotated (silence or matrix escape) — "
-                "peak champion was not raised. Paper follows Live, not peak."
+                "No better setup than the best known one — "
+                "paper settings were only tweaked while waiting."
             )
         elif week_ret >= 0:
             st.caption(
@@ -1189,12 +1187,11 @@ def live_panel() -> None:
                     else "champion book"
                 )
                 champ_tile = {
-                    "label": f"Peak champion · {_HOLDOUT}",
+                    "label": f"Best known setup · {_HOLDOUT}",
                     "value": f"${c_final:,.0f}",
                     "hint": (
                         f"{c_book} · ${start_eq:,.0f} → ${c_final:,.0f} ({c_ret:+.0%})"
                         + (f" · {c_span}" if c_span else "")
-                        + " · raise-only peak (silence does not change this)"
                     ),
                     "tone": (
                         "good" if c_ret >= week_goal
@@ -1204,13 +1201,12 @@ def live_panel() -> None:
 
         hero_stats = [
             {
-                "label": f"Live / paper book · {_HOLDOUT}",
+                "label": f"What paper trades now · {_HOLDOUT}",
                 "value": f"${week_final:,.0f}",
                 "hint": (
                     f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
                     f"simulated from past candles · goal ≥ {week_goal:.0%} · "
-                    f"{week_n} trades in that holdout · this is what paper trades "
-                    f"(may differ from peak champion)"
+                    f"{week_n} trades in that holdout"
                 ),
                 "tone": week_tone,
             },
@@ -1385,19 +1381,17 @@ def live_panel() -> None:
         _holdout_col = holdout_column_name(_HOLDOUT)
         section_header(
             "Recent searches",
-            "Newest first — Live/paper book vs raise-only peak champion (not the same)",
+            "Newest first — did it find a better setup, or not?",
         )
         st.caption(
-            "Paper trades the **Live / `.env` book**, not automatically the peak champion. "
-            "Silence/matrix escape can rotate Live without raising peak. "
-            "**Trading now** = Live lev×TF after that pass. "
-            "**Matrix scored** = full TF×lev cells tested that pass. "
-            "Repeated 10×@5m can mean HOLD, silence densify, or no peak raise — not 'only searched 5m'."
+            "**What happened** is the answer: better setup found and deployed, or not. "
+            "Tweaking paper while waiting is not a better setup. "
+            "**Trading now** = what paper runs after that pass. "
+            "**Matrix scored** = lev×TF cells checked that pass."
         )
         if held_streak >= 3:
             st.caption(
-                f"Last {held_streak} searches did not raise peak (score {score}/100). "
-                "Live knobs may still have rotated — check What happened."
+                f"Last {held_streak} searches found nothing better (score {score}/100)."
             )
 
         # Dedupe key keeps silence + HOLD same gen visible (gen alone hid money truth).

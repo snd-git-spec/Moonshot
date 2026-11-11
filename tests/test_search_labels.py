@@ -1,4 +1,4 @@
-"""Recent searches labels must not lie about champion vs Live/paper."""
+"""Recent searches labels: better found, or not — no jargon lies."""
 
 from __future__ import annotations
 
@@ -10,55 +10,51 @@ from moonshot.hunt.search_labels import (
 )
 
 
-def test_silence_density_never_says_new_champion():
-    h = {
-        "improved": True,
-        "promote_reason": "silence_density",
-        "promote_tier": "silence_density",
-        "week_return": 0.30,
-        "tested": 79,
-    }
-    msg = what_happened_label(h)
-    assert "New champion" not in msg
-    assert "New peak champion" not in msg
-    assert "Live/paper rotated" in msg
-    assert "peak champion unchanged" in msg
-    assert "silence_density" in msg
+def test_silence_is_not_better_setup():
+    msg = what_happened_label(
+        {
+            "improved": True,
+            "promote_reason": "silence_density",
+            "promote_tier": "silence_density",
+            "week_return": 0.30,
+            "tested": 79,
+        }
+    )
+    assert msg == "No better setup found · paper settings tweaked while waiting"
+    assert "silence" not in msg.lower()
+    assert "champion" not in msg.lower()
+    assert "rotated" not in msg.lower()
 
 
-def test_silence_rotate_never_says_new_champion():
+def test_silence_rotate_same_plain_line():
     msg = what_happened_label(
         {"improved": True, "promote_reason": "silence_rotate", "promote_tier": "silence_rotate"}
     )
-    assert "New champion" not in msg
-    assert "Live/paper rotated" in msg
+    assert msg == "No better setup found · paper settings tweaked while waiting"
 
 
-def test_matrix_escape_improved_is_live_rotate_not_champion():
+def test_matrix_escape_improved_not_better():
     msg = what_happened_label(
         {"improved": True, "promote_reason": "matrix_escape", "promote_tier": "matrix_escape"}
     )
-    assert "New champion" not in msg
-    assert "Live/paper rotated" in msg
-    assert "matrix_escape" in msg
+    assert msg == "No better setup found · paper settings tweaked while waiting"
 
 
-def test_research_promote_says_peak_champion():
+def test_research_is_better_found():
     msg = what_happened_label(
         {"improved": True, "promote_reason": "research", "promote_tier": "research"}
     )
-    assert msg.startswith("New peak champion deployed to paper")
+    assert msg == "Better setup found · deployed to paper"
 
 
-def test_champion_rescue_says_restored():
+def test_champion_rescue_plain():
     msg = what_happened_label(
         {"improved": True, "promote_reason": "champion_rescue", "promote_tier": "champion_rescue"}
     )
-    assert "Peak champion restored" in msg
-    assert "New champion" not in msg
+    assert msg == "Best known setup put back on paper"
 
 
-def test_hold_does_not_say_still_champion():
+def test_hold_is_no_better():
     msg = what_happened_label(
         {
             "improved": False,
@@ -67,18 +63,16 @@ def test_hold_does_not_say_still_champion():
             "material_why": "identical knobs",
         }
     )
-    assert "Still champion" not in msg
-    assert "No deploy" in msg
-    assert "peak unchanged" in msg
+    assert msg == "No better setup found · checked 46 ideas"
+    assert "champion" not in msg.lower()
+    assert "identical" not in msg.lower()
 
 
-def test_holdout_week_note_not_champion_wording():
+def test_holdout_week_is_just_percent():
     note = holdout_week_note(
         {"improved": True, "promote_reason": "silence_density", "week_return": 0.298}
     )
-    assert "champion" not in note.lower()
-    assert "+30%" in note
-    assert "Live" in note
+    assert note == "+30%"
 
 
 def test_holdout_column_never_says_champion():
@@ -95,7 +89,6 @@ def test_matrix_label_uses_full_tf_lev_matrix():
             {"tf": "4h", "leverage": 5},
             {"tf": "5m", "leverage": 5},
         ],
-        # Legacy collapse must be ignored when full matrix present.
         "leverage_ladder": [
             {"timeframe": "5m", "leverage": 5},
             {"timeframe": "5m", "leverage": 10},
@@ -103,11 +96,10 @@ def test_matrix_label_uses_full_tf_lev_matrix():
     }
     label = matrix_scored_label(h)
     assert "15m" in label and "1h" in label and "4h" in label
-    assert "ladder alias" not in label
-    assert "5 cells" in label
+    assert "ladder" not in label
 
 
-def test_matrix_label_legacy_ladder_marked_alias():
+def test_matrix_label_legacy_marked_old_log():
     h = {
         "tested": 79,
         "leverage_ladder": [
@@ -117,5 +109,4 @@ def test_matrix_label_legacy_ladder_marked_alias():
         ],
     }
     label = matrix_scored_label(h)
-    assert "ladder alias" in label
-    assert "5m" in label
+    assert "old log" in label
