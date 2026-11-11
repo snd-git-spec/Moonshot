@@ -45,6 +45,7 @@ from moonshot.hunt.improve import (
     improve_once,
 )
 from moonshot.hunt.health import (
+    _arm_skip_denser,
     hunt_pass_health,
     recent_oom_hint,
 )
@@ -82,10 +83,9 @@ def _run_scoreboard_watchdog() -> dict:
         reason = "no_finish" if "HUNT_NO_FINISH" in msg else "pass_stuck"
         if recent_oom_hint():
             reason = "oom"
-        st["force_matrix_slim"] = True
-        st["hunt_recover_reason"] = reason
+        _arm_skip_denser(st, reason)
         log.warning(
-            "SCOREBOARD WATCHDOG · force_matrix_slim=1 reason=%s (lev 5/7/10 retained)",
+            "SCOREBOARD WATCHDOG · force_skip_denser=1 reason=%s · matrix stays FULL",
             reason,
         )
 
@@ -190,19 +190,21 @@ def _run_scoreboard_watchdog() -> dict:
             "week_ret": champ_week_f,
         },
     }
-    want_slim = bool(st.get("force_matrix_slim"))
+    want_skip = bool(st.get("force_skip_denser"))
     want_reason = st.get("hunt_recover_reason")
     want_pending = st.get("pending_champion_rescue")
     want_trail = st.get("champ_trail_streak")
 
     def _patch(latest: dict) -> None:
         latest["scoreboard_watchdog"] = wd
+        # Never keep legacy TF-slim flag.
+        latest.pop("force_matrix_slim", None)
         if "pending_champion_rescue" in st:
             latest["pending_champion_rescue"] = want_pending
         if "champ_trail_streak" in st:
             latest["champ_trail_streak"] = want_trail
-        if want_slim:
-            latest["force_matrix_slim"] = True
+        if want_skip:
+            latest["force_skip_denser"] = True
             if want_reason:
                 latest["hunt_recover_reason"] = want_reason
 
@@ -390,6 +392,8 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
     state["hunt_symbols"] = list(symbols)
     state["paper_symbols"] = list(paper_symbols)
     state["busy"] = False
+    # Kill legacy TF-slim lock forever — denser skip is one-shot only.
+    state.pop("force_matrix_slim", None)
     _save_autopilot_state(state)
 
     if args.improve_only:

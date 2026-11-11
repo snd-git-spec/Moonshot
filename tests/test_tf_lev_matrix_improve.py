@@ -126,6 +126,21 @@ def test_denser_seeds_inherit_winner_tf():
     assert all(str(c.timeframe) == "1h" for c in out)
 
 
+def test_denser_grid_capped_at_27():
+    """3 strat × 3 lev × 3 adx × 1 cooldown ≤ HUNT_DENSER_MAX — never the 81 bomb."""
+    from moonshot.hunt.constants import (
+        HUNT_DENSER_COOLDOWNS,
+        HUNT_DENSER_MAX,
+        HUNT_STRATEGIES,
+    )
+
+    n = len(HUNT_STRATEGIES) * 3 * 3 * len(HUNT_DENSER_COOLDOWNS)
+    assert n <= int(HUNT_DENSER_MAX)
+    assert n == 27
+    assert HUNT_DENSER_COOLDOWNS == (1,)
+    assert int(HUNT_DENSER_MAX) == 27
+
+
 def test_period_robust_blocks_hot_red_week():
     ok, why = _period_robust_ok(
         {"prior_ret": -0.26, "ret": 0.40},

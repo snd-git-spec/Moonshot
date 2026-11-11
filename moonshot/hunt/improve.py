@@ -32,6 +32,8 @@ from moonshot.hunt.constants import (
     HUNT_CHAMPION_STALE_PP,
     HUNT_CHAMP_TRAIL_PASSES,
     HUNT_CHAMP_TRAIL_PP,
+    HUNT_DENSER_COOLDOWNS,
+    HUNT_DENSER_MAX,
     HUNT_MATRIX_SOFT_CAP,
     HUNT_MATRIX_TFS,
     HUNT_SILENCE_MAX_PEAK_GAP_PP,
@@ -213,12 +215,16 @@ def _improve_once_impl(
     )
     # Pass lifecycle — finish signal for MemoryMax / OOM-restart detection.
     # Flock update so _live_feed / watchdog cannot clobber pass_started_at.
-    _pass_box: dict = {"force_slim": False, "recover_reason": None, "ts": ""}
+    # force_skip_denser = one-shot denser skip only — matrix always FULL TFs.
+    _pass_box: dict = {"skip_denser": False, "recover_reason": None, "ts": ""}
 
     def _start_pass(st: dict) -> None:
-        _pass_box["force_slim"] = bool(st.pop("force_matrix_slim", False))
+        # Migrate legacy TF-slim flag → denser skip (never slim matrix TFs).
+        legacy_slim = bool(st.pop("force_matrix_slim", False))
+        skip = bool(st.pop("force_skip_denser", False)) or legacy_slim
+        _pass_box["skip_denser"] = skip
         _pass_box["recover_reason"] = st.pop("hunt_recover_reason", None)
-        if _pass_box["force_slim"] and not _pass_box["recover_reason"]:
+        if skip and not _pass_box["recover_reason"]:
             _pass_box["recover_reason"] = "pass_stuck"
         ts = _utc_now().isoformat()
         _pass_box["ts"] = ts
@@ -227,18 +233,20 @@ def _improve_once_impl(
         st["busy"] = True
 
     _update_autopilot_state(_start_pass)
-    force_slim = bool(_pass_box["force_slim"])
+    skip_denser = bool(_pass_box["skip_denser"])
     recover_reason = _pass_box["recover_reason"]
     state["pass_started_at"] = _pass_box["ts"]
     state["pass_heartbeat_at"] = _pass_box["ts"]
     state["busy"] = True
     state.pop("force_matrix_slim", None)
+    state.pop("force_skip_denser", None)
     state.pop("hunt_recover_reason", None)
-    if force_slim:
+    if skip_denser:
         log.info(
-            "force_matrix_slim · reason=%s · Live TF only (lev 5/7/10 retained)",
+            "force_skip_denser · reason=%s · denser skipped this pass · matrix stays FULL",
             recover_reason,
         )
+    matrix_failed = False
 
     def _pass_heartbeat() -> None:
         ts = _utc_now().isoformat()
@@ -742,27 +750,14 @@ def _improve_once_impl(
             skip_heavy_search=bool(skip_heavy_search),
             live_week_ret=float(base_week.get("ret") or 0),
             hunt_exhausted=bool(state.get("hunt_exhausted")),
-            force_slim=bool(force_slim),
         )
-        if matrix_tfs != tuple(HUNT_MATRIX_TFS):
-            log.info(
-                "tf×lev matrix slim · tfs=%s · skip_heavy=%s force_slim=%s held=%s "
-                "mode=%s live_week=%+.0f%%",
-                matrix_tfs,
-                skip_heavy_search,
-                force_slim,
-                held,
-                search_mode,
-                float(base_week.get("ret") or 0) * 100,
-            )
-        else:
-            log.info(
-                "tf×lev matrix FULL · tfs=%s · held=%s mode=%s live_week=%+.0f%%",
-                matrix_tfs,
-                held,
-                search_mode,
-                float(base_week.get("ret") or 0) * 100,
-            )
+        log.info(
+            "tf×lev matrix FULL · tfs=%s · held=%s mode=%s live_week=%+.0f%%",
+            matrix_tfs,
+            held,
+            search_mode,
+            float(base_week.get("ret") or 0) * 100,
+        )
         # One TF at a time — never hold 5m+15m+1h+4h OHLCV in RAM together on
         # the 2G droplet (that OOMed mid-pass and froze Recent searches).
         _matrix_cfgs = [
@@ -981,8 +976,12 @@ def _improve_once_impl(
         gc.collect()
         log.info("tf cache pruned · keep=%s", sorted(keep_tfs))
     except Exception as e:
-        log.warning("tf×lev matrix failed: %s", e)
+        matrix_failed = True
+        log.critical("MATRIX FAILED · matrix_failed=1 · %s", e)
         tf_lev_matrix_rows = []
+        matrix_winner_cfg = None
+        matrix_winner_row = None
+        matrix_escape = False
 
     # Polish base precedence: matrix winner > revalidated best_by_tf > champion > live
     champ_polish = None
@@ -1041,15 +1040,17 @@ def _improve_once_impl(
             cand_list.append(seed)
         except Exception:
             pass
-    # denser when stuck / explore / breakout: Live-TF knob grid only (~81).
+    # denser when stuck / explore / breakout: Live-TF knob grid ≤ HUNT_DENSER_MAX (27).
     # Cross-TF diversity = sequential TF×lev matrix + explore TF jumps.
     # Do not inject other-TF denser seeds (Stage A reloads full books → OOM).
-    # OOM recovery skips denser — keep Stage A Live-TF only; lev 5/7/10 stay in matrix.
+    # force_skip_denser (oom/stuck recover): skip denser this pass only; matrix stays FULL.
     denser: list[Config] = []
     _pass_heartbeat()
-    _skip_denser = bool(force_slim) and str(recover_reason or "") == "oom"
-    if _skip_denser:
-        log.info("denser skipped · oom recovery (Stage A Live-TF only)")
+    if skip_denser:
+        log.info(
+            "denser skipped · reason=%s · matrix stays FULL",
+            recover_reason or "force_skip_denser",
+        )
     elif (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
@@ -1057,7 +1058,7 @@ def _improve_once_impl(
         for st in HUNT_STRATEGIES:
             for lev in (5, 7, 10):
                 for adx in (14.0, 16.0, 18.0):
-                    for cd in (0, 1, 2):
+                    for cd in HUNT_DENSER_COOLDOWNS:
                         denser.append(
                             replace(
                                 polish_base,
@@ -1080,6 +1081,8 @@ def _improve_once_impl(
                                 ),
                             )
                         )
+        if len(denser) > int(HUNT_DENSER_MAX):
+            denser = denser[: int(HUNT_DENSER_MAX)]
         log.info("denser inject · live_tf=%s · n=%d", _live_tf, len(denser))
     # Dedupe with polish_base as freeze anchor so matrix lev/tf survive
     cand_list = _dedupe_cfgs_matrix(polish_base, list(cand_list) + denser)
@@ -1119,8 +1122,9 @@ def _improve_once_impl(
             len(_stage_a_cands),
             len(cand_list),
         )
-    for cand in _stage_a_cands:
+    for _ai, cand in enumerate(_stage_a_cands):
         tested += 1
+        cheap: dict = {}
         try:
             use_raw = _scout_raw_for_tf(cand.timeframe)
             if not use_raw:
@@ -1139,11 +1143,19 @@ def _improve_once_impl(
             log.warning("stage A failed: %s", e)
             continue
         finally:
+            # Always flush feat_cache after each Stage A cand — 2G Survival.
+            _stats_a = feat_cache.pop("_stats", None)
+            feat_cache.clear()
+            if _stats_a is not None:
+                feat_cache["_stats"] = _stats_a
             # Explore TF jumps must not accumulate every candle size in RAM.
             _ctf = str(getattr(cand, "timeframe", "") or "")
             if _ctf and _ctf != str(base.timeframe):
                 raw_by_tf.pop(_ctf, None)
                 scout_raw_by_tf.pop(_ctf, None)
+            if (_ai + 1) % 5 == 0:
+                _pass_heartbeat()
+                gc.collect()
         n_tr = int(cheap.get("trades") or 0)
         row = (
             float(cheap.get("ret") or -999),
@@ -1177,6 +1189,7 @@ def _improve_once_impl(
 
     # ---- Stage B: full scout window week on BTC ----
     stage_b: list = []
+    _pass_heartbeat()
     for _wr, _wn, _rk, cand, _ci, _co in short_a:
         try:
             use_raw = _scout_raw_for_tf(cand.timeframe)
@@ -1220,6 +1233,8 @@ def _improve_once_impl(
     confirm_hits = 0
     confirm_rejects = {"climb": 0, "consider": 0, "err": 0, "dual": 0}
     rotate_pool: list = []
+    _pass_heartbeat()
+    # Stage C workers=1 by default on 2G (see _hunt_soft_workers / MOONSHOT_SOFT_WORKERS).
     workers = _hunt_soft_workers()
 
     _feat_lock = threading.Lock()
@@ -1295,6 +1310,7 @@ def _improve_once_impl(
         else:
             confirm_rejects["consider"] += 1
 
+    _pass_heartbeat()
     stats = feat_cache.get("_stats") or {}
     log.info(
         "halving C: soft-checked %d/%d workers=%d · climbs=%d · rejects %s · "
@@ -2497,6 +2513,8 @@ def _improve_once_impl(
     state["promote_tier"] = promote_tier
     state["leverage_ladder"] = leverage_ladder
     state["tf_lev_matrix"] = list(tf_lev_matrix_rows or [])
+    state["matrix_failed"] = bool(matrix_failed)
+    decision["matrix_failed"] = bool(matrix_failed)
     if matrix_winner_row:
         state["tf_lev_matrix_winner"] = {
             k: matrix_winner_row.get(k)
@@ -2592,6 +2610,7 @@ def _improve_once_impl(
             "promote_tier": decision.get("promote_tier"),
             "promote_reason": promote_reason,
             "material_why": material_why,
+            "matrix_failed": bool(matrix_failed),
             "tested": tested,
             "soft_runs": soft_runs,
             "search_mode": search_mode,
@@ -2636,13 +2655,14 @@ def _improve_once_impl(
     state["history"] = hist[-300:]
 
     def _finish_save(st: dict) -> None:
-        # Preserve recover flags the watchdog set mid-pass for the *next* pass.
-        keep_slim = bool(st.get("force_matrix_slim"))
+        # Preserve one-shot denser skip if watchdog armed mid-pass — never TF slim.
+        keep_skip = bool(st.get("force_skip_denser"))
         keep_reason = st.get("hunt_recover_reason")
         st.clear()
         st.update(state)
-        if keep_slim:
-            st["force_matrix_slim"] = True
+        st.pop("force_matrix_slim", None)  # legacy TF-slim — never re-arm
+        if keep_skip:
+            st["force_skip_denser"] = True
             if keep_reason:
                 st["hunt_recover_reason"] = keep_reason
         st.pop("pass_started_at", None)

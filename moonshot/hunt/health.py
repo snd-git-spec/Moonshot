@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from moonshot.hunt.constants import (
-    HUNT_PASS_MAX_HOURS,
+    HUNT_HEARTBEAT_STALE_MIN,
     HUNT_STALE_FINISH_HOURS,
     HUNT_TERMINAL_GRACE_MIN,
     _update_autopilot_state,
@@ -39,6 +39,13 @@ def hours_since(ts: str | None) -> float | None:
     return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
 
 
+def minutes_since(ts: str | None) -> float | None:
+    dt = _parse_iso(ts)
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
 def _terminal_grace(state: dict) -> bool:
     """Fresh terminal hunt_event only — never improve_start / busy churn."""
     hunt_ev = state.get("hunt_event") or {}
@@ -59,8 +66,8 @@ def hunt_pass_health(
 ) -> dict[str, Any]:
     """Return ok/failures/warnings for hunt pass finish liveness.
 
-    Does not check HUNT_DEAD (caller owns process-alive → dead). When mode is
-    not hunt or process is dead, returns ok with no pass failures.
+    HUNT_PASS_STUCK = busy with stale pass_heartbeat (not wall-clock pass age).
+    HUNT_NO_FINISH = no finished pass for HUNT_STALE_FINISH_HOURS.
     """
     failures: list[str] = []
     warnings: list[str] = []
@@ -74,26 +81,24 @@ def hunt_pass_health(
     last_improve_at = str(state.get("last_improve_at") or "")
     improve_age_h = hours_since(last_improve_at)
     if improve_age_h is None:
-        # Never finished a pass — fall back to process/pass start age.
         improve_age_h = hours_since(str(state.get("pass_started_at") or ""))
         if improve_age_h is None:
             improve_age_h = hours_since(str(state.get("started_at") or ""))
 
-    pass_anchor = str(state.get("pass_started_at") or "") or last_improve_at
-    pass_age_h = hours_since(pass_anchor)
+    hb_ts = str(state.get("pass_heartbeat_at") or "") or str(state.get("pass_started_at") or "")
+    hb_age_min = minutes_since(hb_ts)
 
     if (
         bool(state.get("busy"))
-        and pass_age_h is not None
-        and pass_age_h >= float(HUNT_PASS_MAX_HOURS)
+        and hb_age_min is not None
+        and hb_age_min >= float(HUNT_HEARTBEAT_STALE_MIN)
     ):
         failures.append(
-            f"HUNT_PASS_STUCK: busy=True but pass_started_at {pass_age_h:.1f}h ago "
-            f"(>{float(HUNT_PASS_MAX_HOURS):.1f}h) — pass not finishing"
+            f"HUNT_PASS_STUCK: busy=True but pass_heartbeat_at {hb_age_min:.0f}m ago "
+            f"(>{float(HUNT_HEARTBEAT_STALE_MIN):.0f}m) — pass not progressing"
         )
 
     if improve_age_h is not None and improve_age_h >= float(HUNT_STALE_FINISH_HOURS):
-        # Intentionally ignore fresh started_at / improve_start — OOM loops refresh those.
         failures.append(
             f"HUNT_NO_FINISH: last_improve_at {improve_age_h:.1f}h ago "
             f"(>{float(HUNT_STALE_FINISH_HOURS):.0f}h) while mode=hunt — "
@@ -135,6 +140,13 @@ def recent_oom_hint(since_minutes: float = 30.0) -> bool:
     )
 
 
+def _arm_skip_denser(state: dict, reason: str) -> None:
+    """One-shot denser skip — never TF-slim the matrix."""
+    state["force_skip_denser"] = True
+    state.pop("force_matrix_slim", None)  # legacy TF-slim key — never keep
+    state["hunt_recover_reason"] = str(reason or "pass_stuck")
+
+
 def record_pass_abort(
     *,
     generation: int,
@@ -165,9 +177,7 @@ def record_pass_abort(
         state.pop("pass_started_at", None)
         state.pop("pass_heartbeat_at", None)
         if recover:
-            state["force_matrix_slim"] = True
-            if not state.get("hunt_recover_reason"):
-                state["hunt_recover_reason"] = "pass_stuck"
+            _arm_skip_denser(state, "pass_stuck")
 
     _update_autopilot_state(_mutate)
     log.error("PASS ABORT recorded · gen=%s · %s", generation, err_s)

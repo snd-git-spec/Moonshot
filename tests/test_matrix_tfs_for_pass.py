@@ -1,9 +1,14 @@
-"""TF×lev matrix must not slim to Live TF while hunt is stuck."""
+"""TF×lev matrix is always the full allow-list — no TF slim path."""
 
 from __future__ import annotations
 
 from moonshot.hunt.constants import HUNT_MATRIX_TFS, HUNT_STUCK_HELD
 from moonshot.hunt.scoring import _matrix_tfs_for_pass
+
+
+def _assert_full(tfs: tuple[str, ...]) -> None:
+    assert tfs == tuple(HUNT_MATRIX_TFS)
+    assert tfs == ("5m", "15m", "1h", "4h")
 
 
 def test_stuck_gets_full_matrix_even_when_live_week_strong():
@@ -14,8 +19,7 @@ def test_stuck_gets_full_matrix_even_when_live_week_strong():
         skip_heavy_search=False,
         live_week_ret=0.30,
     )
-    assert tfs == tuple(HUNT_MATRIX_TFS)
-    assert "15m" in tfs and "1h" in tfs and "4h" in tfs
+    _assert_full(tfs)
 
 
 def test_explore_gets_full_matrix_when_live_strong():
@@ -26,7 +30,7 @@ def test_explore_gets_full_matrix_when_live_strong():
         skip_heavy_search=False,
         live_week_ret=0.25,
     )
-    assert tfs == tuple(HUNT_MATRIX_TFS)
+    _assert_full(tfs)
 
 
 def test_breakout_gets_full_matrix_when_live_strong():
@@ -37,10 +41,10 @@ def test_breakout_gets_full_matrix_when_live_strong():
         skip_heavy_search=False,
         live_week_ret=0.40,
     )
-    assert tfs == tuple(HUNT_MATRIX_TFS)
+    _assert_full(tfs)
 
 
-def test_polish_strong_live_may_slim():
+def test_polish_strong_live_still_full():
     tfs = _matrix_tfs_for_pass(
         base_tf="5m",
         held=0,
@@ -48,7 +52,7 @@ def test_polish_strong_live_may_slim():
         skip_heavy_search=False,
         live_week_ret=0.20,
     )
-    assert tfs == ("5m",)
+    _assert_full(tfs)
 
 
 def test_polish_weak_live_full_matrix():
@@ -59,7 +63,7 @@ def test_polish_weak_live_full_matrix():
         skip_heavy_search=False,
         live_week_ret=0.05,
     )
-    assert tfs == tuple(HUNT_MATRIX_TFS)
+    _assert_full(tfs)
 
 
 def test_exhausted_forces_full_matrix():
@@ -71,10 +75,10 @@ def test_exhausted_forces_full_matrix():
         live_week_ret=0.50,
         hunt_exhausted=True,
     )
-    assert tfs == tuple(HUNT_MATRIX_TFS)
+    _assert_full(tfs)
 
 
-def test_skip_heavy_slims_only_when_not_stuck():
+def test_skip_heavy_never_slims_matrix():
     slim = _matrix_tfs_for_pass(
         base_tf="5m",
         held=0,
@@ -82,7 +86,7 @@ def test_skip_heavy_slims_only_when_not_stuck():
         skip_heavy_search=True,
         live_week_ret=0.10,
     )
-    assert slim == ("5m",)
+    _assert_full(slim)
     full = _matrix_tfs_for_pass(
         base_tf="5m",
         held=int(HUNT_STUCK_HELD) + 2,
@@ -90,11 +94,11 @@ def test_skip_heavy_slims_only_when_not_stuck():
         skip_heavy_search=True,
         live_week_ret=0.10,
     )
-    assert full == tuple(HUNT_MATRIX_TFS)
+    _assert_full(full)
 
 
-def test_force_slim_overrides_stuck_full_matrix():
-    """OOM / pass-stuck recovery: Live TF only — stuck must not force FULL TFs."""
+def test_force_slim_kwarg_ignored_always_full():
+    """Legacy force_slim must not cut TFs — denser skip is separate."""
     tfs = _matrix_tfs_for_pass(
         base_tf="5m",
         held=int(HUNT_STUCK_HELD) + 5,
@@ -104,4 +108,4 @@ def test_force_slim_overrides_stuck_full_matrix():
         hunt_exhausted=True,
         force_slim=True,
     )
-    assert tfs == ("5m",)
+    _assert_full(tfs)

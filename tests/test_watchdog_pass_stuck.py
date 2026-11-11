@@ -1,4 +1,4 @@
-"""Watchdog must CRITICAL + force_matrix_slim on stuck / no-finish passes."""
+"""Watchdog must CRITICAL + force_skip_denser on stuck / no-finish (never TF slim)."""
 
 from __future__ import annotations
 
@@ -38,13 +38,14 @@ def _patch_state_io(monkeypatch, disk: dict):
     return ap
 
 
-def test_watchdog_sets_force_slim_on_no_finish(tmp_path, monkeypatch):
+def test_watchdog_sets_skip_denser_on_no_finish(tmp_path, monkeypatch):
     disk = {
         "mode": "hunt",
         "busy": True,
         "started_at": _iso(0.1),
         "last_improve_at": _iso(float(HUNT_STALE_FINISH_HOURS) + 1.5),
         "pass_started_at": _iso(0.2),
+        "force_matrix_slim": True,  # legacy — must be cleared
         "hunt_event": {"kind": "improve_start", "ts": _iso(0.05)},
         "champion": {
             "knobs": {"strategy": "momentum_15", "timeframe": "5m", "leverage": 10},
@@ -61,7 +62,8 @@ def test_watchdog_sets_force_slim_on_no_finish(tmp_path, monkeypatch):
 
     out = ap._run_scoreboard_watchdog()
     assert out["critical"] is True
-    assert disk["force_matrix_slim"] is True
+    assert disk["force_skip_denser"] is True
+    assert "force_matrix_slim" not in disk or disk.get("force_matrix_slim") in (None, False)
     assert disk["hunt_recover_reason"] in ("no_finish", "pass_stuck", "oom")
     assert any("HUNT_NO_FINISH" in a for a in out["alerts"])
 
@@ -85,7 +87,8 @@ def test_watchdog_oom_hint_sets_reason_oom(monkeypatch):
     out = ap._run_scoreboard_watchdog()
     assert out["critical"] is True
     assert disk["hunt_recover_reason"] == "oom"
-    assert disk["force_matrix_slim"] is True
+    assert disk["force_skip_denser"] is True
+    assert disk.get("force_matrix_slim") in (None, False)
 
 
 def test_watchdog_save_preserves_pass_started_at(monkeypatch):
@@ -110,4 +113,5 @@ def test_watchdog_save_preserves_pass_started_at(monkeypatch):
     ap._run_scoreboard_watchdog()
     assert disk["pass_started_at"] == "2026-11-11T11:32:11+00:00"
     assert disk["pass_heartbeat_at"] == "2026-11-11T11:32:40+00:00"
-    assert disk["force_matrix_slim"] is True
+    assert disk["force_skip_denser"] is True
+    assert disk.get("force_matrix_slim") in (None, False)

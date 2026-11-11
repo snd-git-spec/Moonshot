@@ -151,9 +151,12 @@ HUNT_SOFT_BUDGET = {"polish": 10, "explore": 14, "breakout": 16}
 # After this many HOLD passes, loosen floor / widen confirm so overnight climb continues
 HUNT_STUCK_HELD = 6
 # Pass liveness (MemoryMax / OOM-restart loops): finish signal, not activity.
-HUNT_PASS_MAX_HOURS = 2.5  # busy + pass_started_at older than this → stuck
+# Stuck = no heartbeat progress (not wall-clock alone — full matrix passes are long).
+HUNT_HEARTBEAT_STALE_MIN = 40.0  # busy + pass_heartbeat_at older → HUNT_PASS_STUCK
 HUNT_STALE_FINISH_HOURS = 6.0  # no last_improve_at move → HUNT_NO_FINISH
 HUNT_TERMINAL_GRACE_MIN = 15.0  # ignore stale right after hold/upgrade/etc.
+# Back-compat alias (old wall-clock stuck); health uses heartbeat stale instead.
+HUNT_PASS_MAX_HOURS = HUNT_HEARTBEAT_STALE_MIN / 60.0
 HUNT_CHAMPION_STALE_PP = 0.08  # stored peak − live reeval ≥ 8pp → floor uses live
 HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
 # A.4 — research allow-list includes 1h/4h; keep 5m/15m for continuity.
@@ -161,6 +164,10 @@ HUNT_TF_ALLOW = ("5m", "15m", "1h", "4h")
 # Full bake-off TFs for like-for-like TF×lev matrix (same as allow list).
 HUNT_MATRIX_TFS = HUNT_TF_ALLOW
 HUNT_MATRIX_SOFT_CAP = 8  # soft+robust only top-N by hard week_ret
+# Denser knob grid on Live TF only: 3 strat × 3 lev × 3 adx × 1 cooldown = 27.
+# 81 (×3 cooldowns) OOMed Stage A on the 2G droplet — never rebuild that bomb.
+HUNT_DENSER_MAX = 27
+HUNT_DENSER_COOLDOWNS = (1,)  # single CD → n ≤ 27
 HUNT_LEV_POLISH = (5, 7, 10)
 HUNT_LEV_BREAKOUT = (5, 7, 10, 15, 25)
 HUNT_LEV_FORCE = (5, 10, 15, 25)
@@ -203,11 +210,16 @@ def autopilot_frozen() -> bool:
 
 
 def _hunt_soft_workers() -> int:
-    """Parallel soft-check workers (1–4). Default 2."""
+    """Parallel soft-check workers (1–4). Default 1 (2G droplet); override via HUNT_SOFT_WORKERS."""
+    raw = os.getenv("HUNT_SOFT_WORKERS", "").strip()
+    if not raw:
+        # deploy_do sets MOONSHOT_SOFT_WORKERS=1; default safe for shared MemoryMax=2000M
+        ms = os.getenv("MOONSHOT_SOFT_WORKERS", "1").strip().lower()
+        raw = "1" if ms in ("", "1", "true", "yes") else "2"
     try:
-        n = int(os.getenv("HUNT_SOFT_WORKERS", "2"))
+        n = int(raw)
     except (TypeError, ValueError):
-        n = 2
+        n = 1
     return max(1, min(4, n))
 
 
