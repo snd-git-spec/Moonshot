@@ -945,20 +945,13 @@ def improve_once(
             cand_list.append(seed)
         except Exception:
             pass
-    # denser grid when stuck / explore / breakout — multi-TF so we leave the
-    # Live clock (was pinned to polish_base TF → endless 5m clones).
+    # denser grid when stuck / explore / breakout — always all matrix TFs so we
+    # leave whatever Live candle is deployed (5m/15m/1h/4h), not only 5m.
     denser: list[Config] = []
     if (not skip_heavy_search) and (
         held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
-        if held >= int(HUNT_STUCK_HELD) or search_mode == "breakout":
-            dense_tfs: tuple[str, ...] = tuple(HUNT_MATRIX_TFS)
-        else:
-            # explore: Live TF + two coarser clocks (cheaper than full×4)
-            _bt = str(polish_base.timeframe)
-            dense_tfs = tuple(
-                dict.fromkeys((_bt, "15m", "1h", "4h") if _bt == "5m" else (_bt, "5m", "15m", "1h"))
-            )
+        dense_tfs: tuple[str, ...] = tuple(HUNT_MATRIX_TFS)
         denser = []
         for _dtf in dense_tfs:
             scaled = _scale_bar_knobs_for_tf(polish_base, str(_dtf))
