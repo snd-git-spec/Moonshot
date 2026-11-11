@@ -1384,10 +1384,10 @@ def live_panel() -> None:
             "Newest first — did it find a better setup, or not?",
         )
         st.caption(
-            "**What happened** is the answer: better setup found and deployed, or not. "
+            "Hunt activity only: better setup found and deployed, or not. "
             "Tweaking paper while waiting is not a better setup. "
-            "**Trading now** = what paper runs after that pass. "
-            "**Matrix scored** = lev×TF cells checked that pass."
+            "**Matrix scored** = lev×TF cells checked that pass. "
+            "What paper trades is on the tiles above — not in this log."
         )
         if held_streak >= 3:
             st.caption(
@@ -1417,7 +1417,6 @@ def live_panel() -> None:
                 "When (UTC)": _fmt_utc(he.get("ts")),
                 "What happened": f"In progress · {mode}",
                 "Matrix scored": "running…",
-                "Trading now": "—",
                 "Score": "—",
                 "Win rate": "—",
                 _holdout_col: "—",
@@ -1441,18 +1440,11 @@ def live_panel() -> None:
             result = what_happened_label(h)
             week_note = holdout_week_note(h)
             sc = h.get("score")
-            lev = h.get("leverage")
-            tf = h.get("timeframe") or "—"
-            try:
-                trading_now = f"{int(lev)}×@{tf}" if lev is not None else str(tf)
-            except (TypeError, ValueError):
-                trading_now = str(tf)
             rows.append({
                 "Search #": h.get("generation"),
                 "When (UTC)": _fmt_utc(h.get("ts")),
                 "What happened": result,
                 "Matrix scored": matrix_scored_label(h),
-                "Trading now": trading_now,
                 "Score": sc if sc is not None else "—",
                 "Win rate": f"{float(w):.0%}" if w is not None else "—",
                 _holdout_col: week_note,
