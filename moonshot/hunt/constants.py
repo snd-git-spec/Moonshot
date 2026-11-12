@@ -99,9 +99,13 @@ _SAFE_ENV_KEYS = {
     "TIME_STOP_MIN_R",
 }
 
-# Autopilot hunt targets — PRIMARY bar is holdout-window return with leverage.
-# +100%/holdout is the score goal (compounded leveraged edge), not a stretch label.
+# Autopilot hunt targets.
+# Hunt *search* primary = p25 fold Sortino (see fold_eval / _rank_key).
+# Holdout week_return remains the Live dashboard / +100% *goal* diagnostic — not Stage A sort.
 HUNT_TARGETS = {
+    # Fold-primary search floor (p25 Sortino across folds)
+    "fold_sortino_floor": 0.0,
+    "hunt_primary_metric": "p25_fold_sortino",
     "train_exp": 0.10,
     "test_exp": 0.08,
     "train_n": 20,
@@ -124,12 +128,31 @@ HUNT_TARGETS = {
     "oos_floor": 0.0,
     "prior_week_floor": 0.0,
     "soft_promote_floor": 0.0,
+    # Escape promote (leave a death book): absolute wipeout floors + relative
+    # vs Live. Week-led-only escape is forbidden — holdout green / OOS red
+    # must not patch .env.
+    "escape_oos_floor": -0.10,
+    "escape_soft_floor": -0.10,
+    "escape_rel_oos_pp": 0.02,
+    "escape_rel_soft_pp": 0.02,
+    "escape_week_slack_pp": 0.05,  # cand week may be up to 5pp below Live
+    # Arm escape only when Live is a death book (see live_death_book).
+    "escape_arm_oos": -0.10,
+    "escape_arm_soft": -0.10,
+    # Sealed holdout (blind exam after selection) — calendar days after selection end.
+    "sealed_holdout_days": 14,
+    "sealed_week_floor": 0.0,
+    "sealed_vs_live_edge": 0.008,  # match RESEARCH_MIN_WEEK_EDGE default spirit
+    "escape_sealed_floor": -0.10,
     # Reject classic kill illusion: hard quit-while-ahead while soft bleeds
     "block_kill_illusion": True,
     # Refuse .env patch when research venue ≠ MEXC and MEXC holdout ≤ 0 while research > 0
     "require_mexc_transfer_ok": True,
     # Research promote requires walk-forward green (silence_rotate may bypass)
     "require_walk_forward": True,
+    # DSR promote floor (research); escape records but does not require
+    "require_dsr": True,
+    "dsr_threshold": 0.0,
 }
 
 # Fast hunt knobs — more passes/hour beat giant slow batches for self-improve.
@@ -163,10 +186,12 @@ HUNT_STRATEGIES = ("trend_mtf", "momentum_15", "combo_or")
 HUNT_TF_ALLOW = ("5m", "15m", "1h", "4h")
 # Full bake-off TFs for like-for-like TF×lev matrix (same as allow list).
 HUNT_MATRIX_TFS = HUNT_TF_ALLOW
-HUNT_MATRIX_SOFT_CAP = 8  # soft+robust only top-N by hard week_ret
+HUNT_MATRIX_SOFT_CAP = 5  # soft+robust top-N (TF-diverse pick; see _matrix_soft_pick)
 # Denser knob grid on Live TF only: 3 strat × 3 lev × 3 adx × 1 cooldown = 27.
 # 81 (×3 cooldowns) OOMed Stage A on the 2G droplet — never rebuild that bomb.
 HUNT_DENSER_MAX = 27
+HUNT_EXHAUSTED_DENSER_MAX = 36  # cross-TF denser when hunt_exhausted
+HUNT_RETIRE_GRACE_PASSES = 10  # paper retire without robust → regime_reassess
 HUNT_DENSER_COOLDOWNS = (1,)  # single CD → n ≤ 27
 HUNT_LEV_POLISH = (5, 7, 10)
 HUNT_LEV_BREAKOUT = (5, 7, 10, 15, 25)
@@ -174,8 +199,10 @@ HUNT_LEV_FORCE = (5, 10, 15, 25)
 
 # Successive-halving + curriculum + banlist + champion rescue
 HUNT_HALVING_A_DAYS = 45  # cheap Stage A window on BTC
-HUNT_HALVING_A_KEEP = 24
+HUNT_HALVING_A_KEEP = 16  # thinner Stage A→B keep (was 24; stuck fat was churn)
 HUNT_HALVING_B_KEEP = 12
+# When stuck: raise soft_budget to at least this (was 20 — fat funnel diluted escapes).
+HUNT_STUCK_SOFT_BUDGET = 14
 HUNT_CURRICULUM_SYMBOLS = ("BTC/USDT:USDT", "ETH/USDT:USDT")
 HUNT_BANLIST_CAP = 5000
 HUNT_BAN_WEEK_FLOOR = -0.20  # week_ret below this → ban

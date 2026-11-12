@@ -124,7 +124,7 @@ class Config:
     partial_pct: float = 0.50
 
     # costs (VERIFY against MEXC's current futures fee schedule)
-    fee_taker: float = 0.0002  # MEXC USDT-M taker per ccxt (maker is 0); re-verify before live
+    fee_taker: float = 0.0008  # MEXC API futures taker (web/app is 0.02%; API is 0.08% since 2026-06-01)
     slippage_bps: float = 3.0
     funding_rate: float = 0.0001  # per interval; positive = longs pay shorts
     funding_interval_hours: int = 8
@@ -227,7 +227,7 @@ class Config:
             mom_lookback=int(os.getenv("MOM_LOOKBACK", "8")),
             mom_min_atr=float(os.getenv("MOM_MIN_ATR", "0.5")),
             initial_stop_atr=float(os.getenv("INITIAL_STOP_ATR", "1.5")),
-            fee_taker=float(os.getenv("FEE_TAKER", "0.0002")),  # MEXC USDT-M taker 0.02%
+            fee_taker=float(os.getenv("FEE_TAKER", "0.0008")),  # MEXC API futures taker 0.08%
             slippage_bps=float(os.getenv("SLIPPAGE_BPS", "3")),
             h4_ema_fast=int(os.getenv("H4_EMA_FAST", "20")),
             h4_ema_slow=int(os.getenv("H4_EMA_SLOW", "50")),

@@ -1,4 +1,4 @@
-"""Recent searches labels: better found, or not — no jargon lies."""
+"""Recent searches labels: better found, escape, or not — no jargon lies."""
 
 from __future__ import annotations
 
@@ -6,8 +6,12 @@ from moonshot.hunt.search_labels import (
     holdout_column_name,
     holdout_week_note,
     matrix_scored_label,
+    oos_week_note,
+    robust_flag_note,
     what_happened_label,
 )
+
+_ESCAPE = "Escape deploy — left a worse Live book; did not pass period-robust"
 
 
 def test_silence_is_not_better_setup():
@@ -16,11 +20,12 @@ def test_silence_is_not_better_setup():
             "improved": True,
             "promote_reason": "silence_density",
             "promote_tier": "silence_density",
+            "promote_provenance": "escape",
             "week_return": 0.30,
             "tested": 79,
         }
     )
-    assert msg == "No better setup found · paper settings tweaked while waiting"
+    assert msg == _ESCAPE
     assert "silence" not in msg.lower()
     assert "champion" not in msg.lower()
     assert "rotated" not in msg.lower()
@@ -28,30 +33,62 @@ def test_silence_is_not_better_setup():
 
 def test_silence_rotate_same_plain_line():
     msg = what_happened_label(
-        {"improved": True, "promote_reason": "silence_rotate", "promote_tier": "silence_rotate"}
+        {
+            "improved": True,
+            "promote_reason": "silence_rotate",
+            "promote_tier": "silence_rotate",
+            "promote_provenance": "escape",
+        }
     )
-    assert msg == "No better setup found · paper settings tweaked while waiting"
+    assert msg == _ESCAPE
 
 
 def test_matrix_escape_improved_not_better():
     msg = what_happened_label(
-        {"improved": True, "promote_reason": "matrix_escape", "promote_tier": "matrix_escape"}
+        {
+            "improved": True,
+            "promote_reason": "matrix_escape",
+            "promote_tier": "matrix_escape",
+            "promote_provenance": "escape",
+        }
     )
-    assert msg == "No better setup found · paper settings tweaked while waiting"
+    assert msg == _ESCAPE
 
 
 def test_research_is_better_found():
     msg = what_happened_label(
-        {"improved": True, "promote_reason": "research", "promote_tier": "research"}
+        {
+            "improved": True,
+            "promote_reason": "research",
+            "promote_tier": "research",
+            "promote_provenance": "robust",
+        }
     )
     assert msg == "Better setup found · deployed to paper"
 
 
 def test_champion_rescue_plain():
     msg = what_happened_label(
-        {"improved": True, "promote_reason": "champion_rescue", "promote_tier": "champion_rescue"}
+        {
+            "improved": True,
+            "promote_reason": "champion_rescue",
+            "promote_tier": "champion_rescue",
+            "promote_provenance": "robust",
+        }
     )
     assert msg == "Best known setup put back on paper"
+
+
+def test_champion_rescue_escape_not_better():
+    msg = what_happened_label(
+        {
+            "improved": True,
+            "promote_reason": "champion_rescue",
+            "promote_tier": "champion_rescue",
+            "promote_provenance": "escape",
+        }
+    )
+    assert msg == _ESCAPE
 
 
 def test_hold_is_no_better():
@@ -75,13 +112,26 @@ def test_holdout_week_is_just_percent():
     assert note == "+30%"
 
 
+def test_oos_and_robust_flag():
+    assert oos_week_note({"test_return": -0.34}) == "-34%"
+    assert robust_flag_note({"promote_provenance": "escape", "improved": True}) == "Escape"
+    assert robust_flag_note({"promote_provenance": "robust", "improved": True}) == "Robust"
+
+
 def test_holdout_column_never_says_champion():
     assert "champion" not in holdout_column_name("holdout 14d").lower()
 
 
-def test_matrix_label_uses_full_tf_lev_matrix():
+def test_matrix_escape_improved_not_better_legacy_tier():
+    """Older rows may lack provenance — reason still marks escape."""
+    msg = what_happened_label(
+        {"improved": True, "promote_reason": "matrix_escape", "promote_tier": "matrix_escape"}
+    )
+    assert msg == _ESCAPE
+
+
+def test_matrix_label_from_cells():
     h = {
-        "tested": 46,
         "tf_lev_matrix": [
             {"tf": "5m", "leverage": 10},
             {"tf": "15m", "leverage": 10},

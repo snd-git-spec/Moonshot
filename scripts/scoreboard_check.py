@@ -193,6 +193,116 @@ def _risk_halt() -> dict | None:
     }
 
 
+def _obs_snapshot() -> dict:
+    """§8 observability spine — paper edge, audit, funnel, cycle freshness."""
+    out: dict = {
+        "expectancy": None,
+        "cycle": None,
+        "audit": [],
+        "hunt_pass": None,
+        "fill_slip_avg_bps": None,
+    }
+    if DB_PATH.exists():
+        con = sqlite3.connect(str(DB_PATH))
+        try:
+            cols = {r[1] for r in con.execute("PRAGMA table_info(expectancy_rollup)")}
+            if cols:
+                row = con.execute(
+                    "SELECT ts, config_hash, n, mean_r, ci_low, ci_high, cost_share, label "
+                    "FROM expectancy_rollup WHERE mode='paper' ORDER BY ts DESC LIMIT 1"
+                ).fetchone()
+                if row:
+                    out["expectancy"] = {
+                        "ts": row[0],
+                        "config_hash": row[1],
+                        "n": row[2],
+                        "mean_r": row[3],
+                        "ci_low": row[4],
+                        "ci_high": row[5],
+                        "cost_share": row[6],
+                        "label": row[7],
+                    }
+            cols = {r[1] for r in con.execute("PRAGMA table_info(cycle_snapshot)")}
+            if cols:
+                row = con.execute(
+                    "SELECT ts, effective_lev, net_lev, feed_age_s, config_hash, "
+                    "halt_reason, cycle_id FROM cycle_snapshot "
+                    "WHERE mode='paper' ORDER BY ts DESC LIMIT 1"
+                ).fetchone()
+                if row:
+                    out["cycle"] = {
+                        "ts": row[0],
+                        "effective_lev": row[1],
+                        "net_lev": row[2],
+                        "feed_age_s": row[3],
+                        "config_hash": row[4],
+                        "halt_reason": row[5],
+                        "cycle_id": row[6],
+                    }
+            rows = con.execute(
+                "SELECT ts, kind, payload FROM events "
+                "WHERE kind IN ('promote','rotate','freeze','restart','rehydrate') "
+                "ORDER BY ts DESC LIMIT 5"
+            ).fetchall()
+            for ts, kind, payload in rows:
+                try:
+                    p = json.loads(payload or "{}")
+                except Exception:
+                    p = {}
+                out["audit"].append(
+                    {
+                        "ts": ts,
+                        "kind": kind,
+                        "reason": p.get("reason"),
+                        "old_hash": p.get("old_hash"),
+                        "new_hash": p.get("new_hash"),
+                    }
+                )
+            row = con.execute(
+                "SELECT AVG(json_extract(payload, '$.slippage_bps')) FROM events "
+                "WHERE kind='fill' AND mode='paper' "
+                "AND ts > datetime('now', '-7 days')"
+            ).fetchone()
+            if row and row[0] is not None:
+                out["fill_slip_avg_bps"] = float(row[0])
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            con.close()
+    exp_db = ROOT / "runs" / "experiments.db"
+    if exp_db.exists():
+        con = sqlite3.connect(str(exp_db))
+        try:
+            row = con.execute(
+                "SELECT started_ts, config_hash, metrics_json, meta_json FROM runs "
+                "WHERE kind='hunt_pass' ORDER BY started_ts DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                try:
+                    metrics = json.loads(row[2] or "{}")
+                except Exception:
+                    metrics = {}
+                try:
+                    meta = json.loads(row[3] or "{}")
+                except Exception:
+                    meta = {}
+                out["hunt_pass"] = {
+                    "ts": row[0],
+                    "config_hash": row[1],
+                    "funnel": metrics.get("funnel"),
+                    "kill_histogram": metrics.get("kill_histogram"),
+                    "promote_reason": meta.get("promote_reason"),
+                    "material_why": meta.get("material_why"),
+                    "sealed_holdout": metrics.get("sealed_holdout"),
+                    "dsr": metrics.get("dsr"),
+                }
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            con.close()
+    return out
+
+
 def check() -> dict:
     st = _load_autopilot_state()
     env_fp = _env_book_fingerprint()
@@ -340,6 +450,47 @@ def check() -> dict:
             "but bleed halt not armed"
         )
 
+    if bool(st.get("hunt_exhausted")):
+        warnings.append(
+            f"hunt_exhausted · no_qualify_streak={st.get('no_qualify_streak')} "
+            f"reassess={bool(st.get('regime_reassess_needed'))}"
+        )
+    grade = st.get("grade") if isinstance(st.get("grade"), dict) else {}
+    week = grade.get("week") if isinstance(grade.get("week"), dict) else {}
+    try:
+        oos = float(grade["test_return"]) if grade.get("test_return") is not None else None
+    except (TypeError, ValueError):
+        oos = None
+    try:
+        soft = float(grade["soft_return"]) if grade.get("soft_return") is not None else None
+    except (TypeError, ValueError):
+        soft = None
+    try:
+        prior = float(week["prior_ret"]) if week.get("prior_ret") is not None else None
+    except (TypeError, ValueError):
+        prior = None
+    if oos is not None and soft is not None and prior is not None:
+        if oos < 0 or soft < 0 or prior < 0:
+            warnings.append(
+                f"live period-robust FAIL · prior={prior:+.0%} oos={oos:+.0%} soft={soft:+.0%}"
+            )
+    hist_sealed = last.get("sealed_holdout") if isinstance(last, dict) else None
+    if isinstance(hist_sealed, dict) and hist_sealed.get("evaluated") is False:
+        if last.get("improved") or str(last.get("promote_provenance") or "") == "robust":
+            warnings.append("sealed_holdout not evaluated on last promote attempt")
+    try:
+        hunt_pass = _obs_snapshot().get("hunt_pass")
+    except Exception:
+        hunt_pass = None
+    if isinstance(hunt_pass, dict):
+        sh = hunt_pass.get("sealed_holdout") or {}
+        dsr = (hunt_pass.get("dsr") if isinstance(hunt_pass.get("dsr"), dict) else None)
+        if dsr is None:
+            # dsr may only be on metrics — already nested under sealed path in obs
+            pass
+        if isinstance(sh, dict) and sh.get("evaluated") is False and hunt_pass.get("promote_reason"):
+            warnings.append("obs hunt_pass sealed_holdout.evaluated=false")
+
     report = {
         "ok": not failures,
         "env": {"strategy": env_fp[0], "timeframe": env_fp[1], "leverage": env_fp[2]},
@@ -363,6 +514,9 @@ def check() -> dict:
             "generation": st.get("generation"),
             "last_improve_at": last_improve_at or None,
             "improve_age_hours": round(improve_age_h, 2) if improve_age_h is not None else None,
+            "hunt_exhausted": bool(st.get("hunt_exhausted")),
+            "regime_reassess_needed": bool(st.get("regime_reassess_needed")),
+            "no_qualify_streak": st.get("no_qualify_streak"),
         },
         "bleed": bleed,
         "paper_bleed_halt": st.get("paper_bleed_halt"),
@@ -379,6 +533,7 @@ def check() -> dict:
         },
         "closes": closes[:5],
         "close_pnl_sum5": round(sum(c["pnl"] for c in closes[:5]), 2) if closes else 0.0,
+        "observability": _obs_snapshot(),
         "failures": failures,
         "warnings": warnings,
     }
@@ -411,6 +566,36 @@ def main() -> int:
         )
         print(f"bleed {report['bleed']} halt_flag={report['paper_bleed_halt']}")
         print(f"closes5_sum {report['close_pnl_sum5']} risk={report['risk']}")
+        obs = report.get("observability") or {}
+        exp = obs.get("expectancy") or {}
+        cyc = obs.get("cycle") or {}
+        hunt = obs.get("hunt_pass") or {}
+        if exp:
+            print(
+                f"obs expectancy n={exp.get('n')} mean_r={exp.get('mean_r')} "
+                f"ci=[{exp.get('ci_low')},{exp.get('ci_high')}] "
+                f"label={exp.get('label')} hash={str(exp.get('config_hash') or '')[:8]}"
+            )
+        if cyc:
+            print(
+                f"obs cycle eff_lev={cyc.get('effective_lev')} "
+                f"feed_age={cyc.get('feed_age_s')} id={cyc.get('cycle_id')}"
+            )
+        if hunt.get("funnel"):
+            _fun = hunt.get("funnel") or {}
+            print(
+                f"obs hunt funnel={_fun} "
+                f"primary={_fun.get('primary_metric') or hunt.get('primary_metric') or 'p25_fold_sortino'} "
+                f"reason={hunt.get('promote_reason')} "
+                f"material={hunt.get('material_why')}"
+            )
+        if obs.get("fill_slip_avg_bps") is not None:
+            print(f"obs fill_slip_avg_bps={obs['fill_slip_avg_bps']:.2f}")
+        for a in (obs.get("audit") or [])[:3]:
+            print(
+                f"obs audit {a.get('kind')} reason={a.get('reason')} "
+                f"{str(a.get('old_hash') or '')[:8]}→{str(a.get('new_hash') or '')[:8]}"
+            )
         for f in report["failures"]:
             print(f"FAIL: {f}")
         for w in report["warnings"]:

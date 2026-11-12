@@ -36,6 +36,15 @@ class Position:
     fees: float = 0.0
     funding: float = 0.0
     partial_done: bool = False
+    # Observability (entry-time book + path anatomy)
+    open_config_hash: str | None = None
+    funding_rate_entry: float | None = None
+    intended_qty: float | None = None
+    entry_slippage_bps: float | None = None
+    assumed_slippage_bps: float | None = None
+    mae_r: float = 0.0
+    mfe_r: float = 0.0
+    _bars_held_cached: int = 0
 
     # ---- construction ----
     @classmethod
@@ -97,15 +106,23 @@ class Position:
             return 0.0
         return self.sign * (price - self.initial_entry) / self.initial_risk_per_unit
 
+    def update_excursion(self, price: float) -> None:
+        """Track max adverse / favorable excursion in R since entry."""
+        r = float(self.r_multiple(price))
+        self.mae_r = min(float(self.mae_r), r)
+        self.mfe_r = max(float(self.mfe_r), r)
+
     def bars_held(self, bar_ts, bar_td: pd.Timedelta) -> int:
         """Whole bars since entry fill (0 on the entry bar)."""
         try:
             delta = pd.Timestamp(bar_ts) - pd.Timestamp(self.entry_time)
             if bar_td.total_seconds() <= 0:
                 return 0
-            return max(0, int(delta / bar_td))
+            n = max(0, int(delta / bar_td))
+            self._bars_held_cached = n
+            return n
         except Exception:
-            return 0
+            return int(getattr(self, "_bars_held_cached", 0) or 0)
 
     def liq_price(self, mmr: float) -> float:
         return self.avg_entry * (1 - self.sign * (1.0 / self.leverage - mmr))
@@ -172,6 +189,15 @@ class Position:
             fees=self.fees + fee,
             funding=self.funding,
             initial_risk_dollars=float(risk),
+            intended_qty=self.intended_qty if self.intended_qty is not None else self.initial_qty,
+            filled_qty=self.initial_qty,
+            slippage_bps=self.entry_slippage_bps,
+            assumed_slippage_bps=self.assumed_slippage_bps,
+            funding_rate_entry=self.funding_rate_entry,
+            mae_r=float(self.mae_r),
+            mfe_r=float(self.mfe_r),
+            bars_held=int(getattr(self, "_bars_held_cached", 0) or 0),
+            open_config_hash=self.open_config_hash,
         )
         self.current_qty = 0.0
         return res, gross - fee
@@ -202,4 +228,6 @@ class Position:
             )
             for a in d["adds"]
         ]
-        return cls(**d)
+        # Drop unknown keys so older/newer position JSON stays loadable.
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in d.items() if k in known})

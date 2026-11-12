@@ -50,5 +50,5 @@ Compare: champion week · Live week · `.env` book · paper book · last paper c
 
 ## Honesty — policy vs wired
 
-- **Wired today:** material week edge, period-robust (with escape bypasses), transfer gate, apply+verify, lev-up margins, hysteresis/dwell, paper retire nudge, 2× cost-vs-Live on non-escape research, stop-N flag.
-- **Policy / not yet hard-gated:** sealed holdout unseen by search, DSR promote floor. Do **not** claim a promote failed "sealed/DSR" until those are enforced in code.
+- **Wired today:** **fold-primary hunt search** (Stage A / `_rank_key` / champion raise on p25 per-fold Sortino, then 2× cost, then ROI; week is diagnostic / Live goal only), material week edge on research promote, period-robust (escape only when Live is a death book; escape does **not** raise champion_peak), sealed holdout (blind exam after selection), DSR promote floor on research, transfer gate, apply+verify, lev-up margins, hysteresis/dwell, paper retire nudge, 2× cost-vs-Live on non-escape research, banlist on cost/DSR/sealed/fold-floor fails, stop-N / hunt_exhausted (forces breakout + cross-TF denser; clears only on robust promote).
+- **Policy / not yet hard-gated:** PBO via CSCV (DSR is the v1 multiple-testing gate).

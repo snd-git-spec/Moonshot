@@ -76,10 +76,24 @@ class PaperBroker(BaseBroker):
         """Persisted last marks so equity is reconstructable without a live tick."""
         return {str(s): float(p) for s, p in self.last.items()}
 
-    def _fill(self, symbol: str, side: str, qty: float, price: float) -> Fill:
+    def _fill(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        price: float,
+        *,
+        intended_qty: float | None = None,
+    ) -> Fill:
         self._n += 1
         buy = side == "buy"
+        assumed_bps = float(self.cfg.slippage_bps)
         px = price * (1 + self.cfg.slip if buy else 1 - self.cfg.slip)
+        # Realized vs ref: buy positive = paid up; sell positive = received less.
+        if price > 0:
+            slip_bps = ((px - price) / price) * 10_000.0 * (1.0 if buy else -1.0)
+        else:
+            slip_bps = 0.0
         fee = px * qty * self.cfg.fee_taker
         delta = qty if buy else -qty
         s0 = self.signed.get(symbol, 0.0)
@@ -95,16 +109,29 @@ class PaperBroker(BaseBroker):
             self.avg.pop(symbol, None)
             self.stops.pop(symbol, None)
         self.cash -= fee
-        return Fill(f"paper-{self._n}", symbol, side, qty, px, fee, pd.Timestamp.now(tz="UTC"))
+        return Fill(
+            f"paper-{self._n}",
+            symbol,
+            side,
+            qty,
+            px,
+            fee,
+            pd.Timestamp.now(tz="UTC"),
+            intended_qty=float(intended_qty) if intended_qty is not None else float(qty),
+            ref_price=float(price),
+            slippage_bps=float(slip_bps),
+            assumed_slippage_bps=assumed_bps,
+        )
 
     def market_order(self, symbol, side, qty, ref_price, reduce_only=False) -> Fill:
+        intended = float(qty)
         s0 = self.signed.get(symbol, 0.0)
         if reduce_only:
             if s0 == 0 or (s0 > 0) == (side == "buy"):
                 raise ExecutionError("reduce-only order would not reduce")
             qty = min(qty, abs(s0))
         self.last[symbol] = ref_price
-        return self._fill(symbol, side, qty, ref_price)
+        return self._fill(symbol, side, qty, ref_price, intended_qty=intended)
 
     def set_stop(self, symbol, direction, qty, stop) -> None:
         self.stops[symbol] = stop

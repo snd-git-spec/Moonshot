@@ -116,6 +116,8 @@ class LiveRunner:
         self._book_feats: dict = {}  # symbol -> feature frame from prepare_data
         self._stale_log_at: dict = {}  # symbol -> last stale warning monotonic time
         self._cache_age_sec: Optional[float] = None
+        self._last_expectancy_attempt = 0.0
+        self._was_equity_stale = False
         # Paper must rebuild cash from closed trades even with 0 open positions.
         # Old gate `and self.positions` left wallet stuck at $50 after flat restarts
         # while Live still counted closed trades → "19 closed, balance $50".
@@ -124,6 +126,7 @@ class LiveRunner:
             if self.positions or abs(closed) > 1e-12:
                 marks = self._peek_runtime_last_marks()
                 broker.rehydrate(self.positions or {}, closed, last_marks=marks)
+                self._was_equity_stale = bool(broker.equity_stale)
                 log.info(
                     "paper rehydrated %d open · closed_pnl=%+.2f · cash=%.2f · stale=%s",
                     len(self.positions),
@@ -131,12 +134,36 @@ class LiveRunner:
                     broker.cash,
                     broker.equity_stale,
                 )
+                with contextlib.suppress(Exception):
+                    self.db.log_event(
+                        self._now(),
+                        "*",
+                        "rehydrate",
+                        {
+                            "open": len(self.positions),
+                            "closed_pnl": float(closed),
+                            "equity_stale": bool(broker.equity_stale),
+                            "cycle_id": self._cycle_id or "",
+                        },
+                    )
         # Poll BTC first so alt entries see a fresh regime stamp
         if cfg.require_btc_regime:
             btc = _btc_symbol_in(symbols)
             if btc and symbols[0] != btc:
                 self.symbols = [btc] + [s for s in symbols if s != btc]
         self._load_drift_band()
+        with contextlib.suppress(Exception):
+            self.db.log_event(
+                self._now(),
+                "*",
+                "restart",
+                {
+                    "live": bool(live),
+                    "open": len(self.positions),
+                    "config_hash": self._config_hash_safe(),
+                    "cycle_id": self._cycle_id or "",
+                },
+            )
 
     def _load_drift_band(self) -> None:
         """Pull champion / last-improve soft+week returns for paper drift halt."""
@@ -394,9 +421,12 @@ class LiveRunner:
             return
         self._last_heartbeat = now
         ts = self._now()
+        self._note_equity_stale_cleared(ts)
         equity = self.broker.get_equity()
+        self.risk.update_equity(equity, ts)
         self.db.log_equity(ts, equity, self.risk.peak_equity)
-        self.db.log_risk(ts, self.risk)
+        self._log_risk_cycle(ts, equity, snapshot=True)
+        self._maybe_expectancy_rollup()
         # next candle close (approximate)
         floored = ts.floor(self.cfg.pandas_tf)
         next_close = floored + self.cfg.bar_td
@@ -714,6 +744,100 @@ class LiveRunner:
             for s, p in self.positions.items()
         )
 
+    def _config_hash_safe(self) -> Optional[str]:
+        try:
+            from moonshot.config_hash import config_hash
+
+            return config_hash(self.cfg)
+        except Exception:
+            return None
+
+    def _portfolio_obs(self, equity: float) -> dict:
+        from moonshot.obs import portfolio_lev_metrics
+
+        return portfolio_lev_metrics(
+            self.positions,
+            self.last_price,
+            float(equity),
+            mmr=float(self.cfg.maintenance_margin_rate),
+        )
+
+    def _log_risk_cycle(self, ts: pd.Timestamp, equity: float, *, snapshot: bool = True) -> None:
+        """Enriched risk_snapshot + optional cycle_snapshot (fail-soft)."""
+        obs = self._portfolio_obs(equity)
+        pause = self.risk.pause_until.isoformat() if self.risk.pause_until is not None else None
+        ch = self._config_hash_safe()
+        feed_age = self._cache_age_sec
+        with contextlib.suppress(Exception):
+            self.db.log_risk(
+                ts,
+                self.risk,
+                effective_lev=obs.get("effective_lev"),
+                net_lev=obs.get("net_lev"),
+                margin_used=obs.get("margin_used"),
+                free_margin=obs.get("free_margin"),
+                min_liq_distance_pct=obs.get("min_liq_distance_pct"),
+                config_hash=ch,
+                feed_age_s=feed_age,
+            )
+        if snapshot:
+            with contextlib.suppress(Exception):
+                self.db.log_cycle_snapshot(
+                    ts,
+                    equity=float(equity),
+                    peak=float(self.risk.peak_equity),
+                    effective_lev=float(obs.get("effective_lev") or 0.0),
+                    net_lev=float(obs.get("net_lev") or 0.0),
+                    open_symbols=list(self.positions.keys()),
+                    pause_until=pause,
+                    halt_reason=self.risk.halt_reason or "",
+                    kill=bool(self.risk.kill_switch_active),
+                    config_hash=ch,
+                    feed_age_s=feed_age,
+                    cycle_id=self._cycle_id or "",
+                )
+
+    def _maybe_expectancy_rollup(self) -> None:
+        now = time.time()
+        if now - self._last_expectancy_attempt < 60:
+            return
+        self._last_expectancy_attempt = now
+        with contextlib.suppress(Exception):
+            from moonshot.obs import write_expectancy_rollups
+
+            write_expectancy_rollups(self.db)
+
+    def _note_equity_stale_cleared(self, ts: pd.Timestamp) -> None:
+        if not isinstance(self.broker, PaperBroker):
+            return
+        stale = bool(self.broker.equity_stale)
+        if self._was_equity_stale and not stale:
+            with contextlib.suppress(Exception):
+                self.db.log_event(
+                    ts,
+                    "*",
+                    "equity_stale_cleared",
+                    {"cycle_id": self._cycle_id or ""},
+                )
+        self._was_equity_stale = stale
+
+    def _log_fill_from(self, ts: pd.Timestamp, fill: Any, reason: str) -> None:
+        with contextlib.suppress(Exception):
+            self.db.log_fill(
+                ts,
+                fill.symbol,
+                side=str(fill.side),
+                reason=reason,
+                intended_qty=float(
+                    fill.intended_qty if fill.intended_qty is not None else fill.qty
+                ),
+                filled_qty=float(fill.qty),
+                ref_price=getattr(fill, "ref_price", None),
+                fill_price=float(fill.price),
+                slippage_bps=getattr(fill, "slippage_bps", None),
+                assumed_slippage_bps=getattr(fill, "assumed_slippage_bps", None),
+            )
+
     def _accrue_funding(self, ts: pd.Timestamp) -> None:
         """Match backtest: charge constant funding at settlement hours (paper cash)."""
         cfg = self.cfg
@@ -754,6 +878,7 @@ class LiveRunner:
                 # Flatten paper book at liq
                 side = "sell" if long else "buy"
                 fill = self.broker.market_order(sym, side, pos.current_qty, liq, reduce_only=True)
+                self._log_fill_from(ts, fill, "liquidation")
                 self._finish(sym, pos, liq, 0.0, ts, ExitReason.LIQUIDATION)
                 return True
             reason = (
@@ -765,12 +890,14 @@ class LiveRunner:
             self.broker.cancel_stop(sym)
             side = "sell" if long else "buy"
             fill = self.broker.market_order(sym, side, pos.current_qty, px, reduce_only=True)
+            self._log_fill_from(ts, fill, "stop")
             self._finish(sym, pos, fill.price, fill.fee, ts, reason)
             return True
         if hit_liq:
             self.broker.cancel_stop(sym)
             side = "sell" if long else "buy"
-            self.broker.market_order(sym, side, pos.current_qty, liq, reduce_only=True)
+            fill = self.broker.market_order(sym, side, pos.current_qty, liq, reduce_only=True)
+            self._log_fill_from(ts, fill, "liquidation")
             self._finish(sym, pos, liq, 0.0, ts, ExitReason.LIQUIDATION)
             return True
         return False
@@ -780,10 +907,11 @@ class LiveRunner:
         self._cycle_n += 1
         self._cycle_id = f"{self._cycle_n}-{uuid.uuid4().hex[:8]}"
         self._last_cycle_ts = pd.Timestamp(ts)
+        self._note_equity_stale_cleared(ts)
         equity = self.broker.get_equity()
         self.risk.update_equity(equity, ts)
         self.db.log_equity(ts, equity, self.risk.peak_equity)
-        self.db.log_risk(ts, self.risk)
+        self._log_risk_cycle(ts, equity, snapshot=True)
         log.info(
             "bar_close symbol=%s cycle_id=%s equity=%.4f halt=%s open=%d",
             sym,
@@ -801,6 +929,10 @@ class LiveRunner:
 
         pos = self.positions.get(sym)
         if pos:
+            with contextlib.suppress(Exception):
+                pos.update_excursion(float(price))
+                pos.bars_held(ts, self.cfg.bar_td)
+                self.db.save_position(sym, pos)
             # Wick-aware stops before discretionary exits
             if self._check_bar_stop_liq(sym, pos, bar, ts):
                 self._save_runtime()
@@ -909,6 +1041,13 @@ class LiveRunner:
         pos = Position.open(
             sym, sig.direction, dec.leverage, fill.price, fill.qty, stop, ts, fill.fee
         )
+        pos.intended_qty = float(
+            fill.intended_qty if getattr(fill, "intended_qty", None) is not None else fill.qty
+        )
+        pos.entry_slippage_bps = getattr(fill, "slippage_bps", None)
+        pos.assumed_slippage_bps = getattr(fill, "assumed_slippage_bps", None)
+        pos.funding_rate_entry = float(cfg.funding_rate)
+        pos.open_config_hash = self._config_hash_safe()
         try:
             self.broker.set_stop(sym, pos.direction, pos.current_qty, pos.current_stop)
         except ExecutionError:
@@ -919,6 +1058,7 @@ class LiveRunner:
             raise
         self.positions[sym] = pos
         self.db.save_position(sym, pos)
+        self._log_fill_from(ts, fill, "open")
         self.db.log_event(
             ts,
             sym,
@@ -926,10 +1066,16 @@ class LiveRunner:
             {
                 "direction": sig.direction.value,
                 "qty": fill.qty,
+                "intended_qty": pos.intended_qty,
                 "price": fill.price,
+                "ref_price": getattr(fill, "ref_price", price),
+                "slippage_bps": pos.entry_slippage_bps,
+                "assumed_slippage_bps": pos.assumed_slippage_bps,
                 "stop": stop,
                 "reason": sig.reason,
                 "fill_timing": "next_open",
+                "config_hash": pos.open_config_hash,
+                "funding_rate_entry": pos.funding_rate_entry,
             },
         )
         with contextlib.suppress(Exception):
@@ -957,6 +1103,7 @@ class LiveRunner:
                 fill = self.broker.market_order(
                     sym, close_side, pos.current_qty, price, reduce_only=True
                 )
+                self._log_fill_from(ts, fill, "exit")
                 self._finish(sym, pos, fill.price, fill.fee, ts, a.reason)
                 return
         for a in acts:
@@ -964,14 +1111,17 @@ class LiveRunner:
                 fill = self.broker.market_order(sym, close_side, a.qty, price, reduce_only=True)
                 pos.reduce(fill.price, fill.qty, fill.fee)
                 pos.partial_done = True
+                self._log_fill_from(ts, fill, "partial")
                 self.db.log_event(
                     ts,
                     sym,
                     "partial",
                     {
                         "qty": fill.qty,
+                        "intended_qty": getattr(fill, "intended_qty", fill.qty),
                         "price": fill.price,
                         "remaining": pos.current_qty,
+                        "slippage_bps": getattr(fill, "slippage_bps", None),
                     },
                 )
             elif a.kind is ActionKind.ADD:
@@ -983,15 +1133,19 @@ class LiveRunner:
                     pos.add_lot(
                         fill.price, fill.qty, ts, fill.fee, a.price, pos.unrealized(fill.price)
                     )
+                    self._log_fill_from(ts, fill, "add")
                     self.db.log_event(
                         ts,
                         sym,
                         "add",
                         {
                             "qty": fill.qty,
+                            "intended_qty": getattr(fill, "intended_qty", fill.qty),
                             "price": fill.price,
                             "avg": pos.avg_entry,
                             "stop": pos.current_stop,
+                            "r_at_add": pos.adds[-1].r_at_add if pos.adds else None,
+                            "slippage_bps": getattr(fill, "slippage_bps", None),
                         },
                     )
                     self.notify.send(
@@ -1065,6 +1219,9 @@ class LiveRunner:
                 ts = et + self.cfg.bar_td
         except Exception:
             pass
+        with contextlib.suppress(Exception):
+            pos.update_excursion(float(px))
+            pos.bars_held(ts, self.cfg.bar_td)
         res, _ = pos.close_out(px, fee, ts, reason)
         try:
             from moonshot.config_hash import canonical_json, config_hash
@@ -1073,6 +1230,8 @@ class LiveRunner:
             res.config_json = canonical_json(self.cfg)
         except Exception:
             pass
+        if not res.open_config_hash:
+            res.open_config_hash = getattr(pos, "open_config_hash", None)
         self.positions.pop(sym, None)
         self.pend_exit.pop(sym, None)
         self.db.save_position(sym, None)
@@ -1086,6 +1245,11 @@ class LiveRunner:
                 "pnl": res.pnl,
                 "r": res.r_multiple,
                 "price": px,
+                "mae_r": res.mae_r,
+                "mfe_r": res.mfe_r,
+                "bars_held": res.bars_held,
+                "open_config_hash": res.open_config_hash,
+                "config_hash": res.config_hash,
             },
         )
         self.risk.register_trade_result(res.r_multiple, ts)

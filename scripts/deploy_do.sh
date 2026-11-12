@@ -46,7 +46,8 @@ Environment=MOONSHOT_SOFT_WORKERS=1
 MemoryMax=2000M
 OVR
 # Clamp corrupt generation / clear stuck busy from dead hunt mid-pass.
-# Deploy clears legacy TF-slim; optional one-shot denser skip (matrix stays FULL).
+# Deploy clears legacy TF-slim. Arm one-shot denser skip only when unfrozen
+# (post-reset protection); when AUTOPILOT_FROZEN=1 skip is waste.
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -54,6 +55,14 @@ p = Path("/opt/moonshot/.moonshot_autopilot.json")
 s = json.loads(p.read_text())
 passes = int(s.get("improve_passes") or 0)
 gen = int(s.get("generation") or 0)
+frozen = False
+env_p = Path("/opt/moonshot/.env")
+if env_p.exists():
+    for line in env_p.read_text().splitlines():
+        if line.strip().startswith("AUTOPILOT_FROZEN="):
+            val = line.split("=", 1)[1].strip().strip("\"'")
+            frozen = val in ("1", "true", "TRUE", "yes", "YES")
+            break
 print("before", {
     "generation": gen,
     "improve_passes": passes,
@@ -61,14 +70,19 @@ print("before", {
     "last_improve_at": s.get("last_improve_at"),
     "force_matrix_slim": s.get("force_matrix_slim"),
     "force_skip_denser": s.get("force_skip_denser"),
+    "AUTOPILOT_FROZEN": frozen,
 })
 if passes > 0 and gen > passes + 50:
     s["generation"] = passes
 s["busy"] = False
 s["pending_champion_rescue"] = False
 s.pop("force_matrix_slim", None)  # never TF-slim after deploy
-s["force_skip_denser"] = True  # one-shot denser skip; matrix stays FULL
-s["hunt_recover_reason"] = "deploy"
+if frozen:
+    # Practice freeze: keep denser on; do not arm shallow post-deploy pass.
+    s.pop("hunt_recover_reason", None)
+else:
+    s["force_skip_denser"] = True  # one-shot denser skip; matrix stays FULL
+    s["hunt_recover_reason"] = "deploy"
 # Do not clear last_improve_at — closed-loop verify needs the pre-deploy finish stamp.
 p.write_text(json.dumps(s, indent=2))
 print("after", {
@@ -79,6 +93,7 @@ print("after", {
     "force_matrix_slim": s.get("force_matrix_slim"),
     "force_skip_denser": s.get("force_skip_denser"),
     "hunt_recover_reason": s.get("hunt_recover_reason"),
+    "AUTOPILOT_FROZEN": frozen,
 })
 PY
 .venv/bin/pip install -q -e .

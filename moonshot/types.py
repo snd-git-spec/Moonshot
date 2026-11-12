@@ -120,6 +120,10 @@ class Fill:
     price: float
     fee: float
     timestamp: datetime
+    intended_qty: float | None = None
+    ref_price: float | None = None
+    slippage_bps: float | None = None
+    assumed_slippage_bps: float | None = None
 
 
 @dataclass
@@ -176,10 +180,16 @@ class TradeResult:
     initial_risk_dollars: float = 0.0
     config_hash: str | None = None
     config_json: str | None = None
-
-    @property
-    def duration_hours(self) -> float:
-        return (self.exit_time - self.entry_time).total_seconds() / 3600.0
+    intended_qty: float | None = None
+    filled_qty: float | None = None
+    slippage_bps: float | None = None
+    assumed_slippage_bps: float | None = None
+    spread_bps: float | None = None
+    funding_rate_entry: float | None = None
+    mae_r: float | None = None
+    mfe_r: float | None = None
+    bars_held: int | None = None
+    open_config_hash: str | None = None
 
 
 def _pandas_tf(tf: str) -> str:

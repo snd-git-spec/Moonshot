@@ -438,6 +438,22 @@ def cmd_autopilot(args: argparse.Namespace) -> None:
                         just_promoted = True
                         restart_paper.set()
                         _live_feed("paper_restart", "Restarting practice bot with new settings…")
+                        try:
+                            from moonshot.paths import DB_PATH
+                            from moonshot.persist import Persistence
+
+                            Persistence(str(DB_PATH), mode="paper").log_event(
+                                _utc_now(),
+                                "*",
+                                "restart",
+                                {
+                                    "reason": "promote_paper_restart",
+                                    "generation": gen_box.get("n"),
+                                    "promote": True,
+                                },
+                            )
+                        except Exception:
+                            pass
             except Exception as e:
                 log.error("improve pass failed: %s", e)
                 _live_feed("error", f"Improve pass failed: {e}")

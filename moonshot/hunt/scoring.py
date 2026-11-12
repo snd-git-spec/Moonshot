@@ -451,6 +451,38 @@ def _should_ban_week(week: dict | None, *, kill_illusion: bool = False) -> tuple
     return False, ""
 
 
+def _should_ban_candidate(
+    *,
+    week: dict | None = None,
+    kill_illusion: bool = False,
+    cost_ok: bool | None = None,
+    dsr_fail: bool = False,
+    sealed_fail: bool = False,
+    fold: dict | None = None,
+) -> tuple[bool, str]:
+    """Ban on week wipe, kill illusion, cost/DSR/sealed/fold floor failures."""
+    ok, why = _should_ban_week(week, kill_illusion=kill_illusion)
+    if ok:
+        return True, why
+    if cost_ok is False:
+        return True, "cost_2x_fail"
+    if dsr_fail:
+        return True, "dsr_fail"
+    if sealed_fail:
+        return True, "sealed_fail"
+    if fold:
+        try:
+            p25 = float(fold.get("p25_sortino"))
+        except (TypeError, ValueError):
+            p25 = float("nan")
+        floor = float(HUNT_TARGETS.get("fold_sortino_floor", 0.0))
+        if p25 == p25 and p25 < floor:
+            return True, f"fold_p25<{floor:.2f}"
+        if fold.get("ok") is False and str(fold.get("why") or "").startswith("p25"):
+            return True, f"fold:{fold.get('why')}"
+    return False, ""
+
+
 def _filter_banned(cfgs: list, banned: set[str]) -> tuple[list, int]:
     if not banned:
         return list(cfgs), 0
@@ -531,6 +563,22 @@ def _sync_champion_peak(state: dict, peak: dict | None) -> None:
     state["champion"] = dict(blob)
 
 
+def _champion_primary_score(blob: dict | None) -> float:
+    """Fold-primary score for raise-only; fall back to week for legacy peaks."""
+    if not isinstance(blob, dict):
+        return -999.0
+    try:
+        p25 = blob.get("p25_sortino")
+        if p25 is not None and float(p25) == float(p25):
+            return float(p25)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(blob.get("week_ret_peak") or blob.get("week_ret") or -999)
+    except (TypeError, ValueError):
+        return -999.0
+
+
 def _raise_champion_peak(
     state: dict,
     *,
@@ -540,23 +588,62 @@ def _raise_champion_peak(
     week: dict | None,
     ts: str,
     generation: int,
+    oos_ret: float | None = None,
+    soft_ret: float | None = None,
+    prior_ret: float | None = None,
+    p25_sortino: float | None = None,
+    roi: float | None = None,
+    cost_ok: bool | None = None,
 ) -> dict:
-    """Raise-only update to peak champion (never from silence_rotate)."""
+    """Raise-only peak among research configs by p25 Sortino (legacy week fallback)."""
     prev = _resolve_champion_peak(state)
-    old_peak = float((prev or {}).get("week_ret_peak") or (prev or {}).get("week_ret") or -999)
-    new_w = float(week_ret)
-    if prev and new_w < old_peak - 0.0005:
+    old_primary = _champion_primary_score(prev)
+    try:
+        new_primary = (
+            float(p25_sortino)
+            if p25_sortino is not None and float(p25_sortino) == float(p25_sortino)
+            else float(week_ret)
+        )
+    except (TypeError, ValueError):
+        new_primary = float(week_ret)
+    if prev and new_primary < old_primary - 0.0005:
         _sync_champion_peak(state, prev)
         return prev
+    new_w = float(week_ret)
+    old_week_peak = float((prev or {}).get("week_ret_peak") or (prev or {}).get("week_ret") or -999)
     blob = {
         "ts": ts,
         "generation": generation,
         "week_ret": new_w,
-        "week_ret_peak": max(old_peak, new_w),
+        "week_ret_peak": max(old_week_peak, new_w),  # diagnostic only
+        "p25_sortino": new_primary if p25_sortino is not None else (prev or {}).get("p25_sortino"),
+        "roi": float(roi) if roi is not None else (prev or {}).get("roi"),
+        "cost_ok": bool(cost_ok) if cost_ok is not None else (prev or {}).get("cost_ok"),
         "score": score,
         "knobs": knobs,
         "week": week,
+        "primary_metric": "p25_fold_sortino",
     }
+    if p25_sortino is not None and float(p25_sortino) == float(p25_sortino):
+        blob["p25_sortino"] = float(p25_sortino)
+        prev_p = (prev or {}).get("p25_sortino_peak")
+        try:
+            prev_pf = float(prev_p) if prev_p is not None else -999.0
+        except (TypeError, ValueError):
+            prev_pf = -999.0
+        blob["p25_sortino_peak"] = max(prev_pf, float(p25_sortino))
+    if oos_ret is not None:
+        blob["oos_ret"] = float(oos_ret)
+    if soft_ret is not None:
+        blob["soft_ret"] = float(soft_ret)
+    pr = prior_ret
+    if pr is None and isinstance(week, dict):
+        pr = week.get("prior_ret")
+    if pr is not None:
+        try:
+            blob["prior_ret"] = float(pr)
+        except (TypeError, ValueError):
+            pass
     _sync_champion_peak(state, blob)
     return blob
 
@@ -638,13 +725,17 @@ def _hunt_search_mode(
     hunt: bool,
     *,
     has_champion: bool = False,
+    hunt_exhausted: bool = False,
 ) -> str:
     """
     With champion: ~40% polish / 40% explore / 20% breakout (matrix covers TF×lev).
     Stuck: prefer breakout so cross-strategy elite seeds actually run.
+    Exhausted: 100% breakout — no polish orbit of a dead family.
     """
     if not hunt:
         return "polish"
+    if hunt_exhausted:
+        return "breakout"
     stuck = int(held_streak) >= int(HUNT_STUCK_HELD)
     # Stuck: 60% breakout / 40% explore — polish can't escape a dead family.
     if stuck:
@@ -1190,6 +1281,123 @@ def _holdout_span_ok(days: float, *, min_days: float | None = None) -> bool:
         return False
 
 
+def _matrix_row_key(row: dict) -> tuple[str, int]:
+    return (str(row.get("tf") or ""), int(row.get("leverage") or 0))
+
+
+def _matrix_hard_top_keys(
+    rows: list[dict] | None,
+    *,
+    n: int = 5,
+    dual_composite: bool = False,
+) -> list[tuple[str, int]]:
+    """Rank dense non-skip hard rows; dual_composite uses week_ret+prior_ret."""
+    pool = [r for r in (rows or []) if r and not r.get("skip") and r.get("dense_ok")]
+
+    def _score(r: dict) -> float:
+        try:
+            w = float(r.get("week_ret")) if r.get("week_ret") is not None else -999.0
+        except (TypeError, ValueError):
+            w = -999.0
+        if not dual_composite:
+            return w
+        try:
+            p = float(r.get("prior_ret") or 0)
+        except (TypeError, ValueError):
+            p = 0.0
+        return w + p
+
+    ranked = sorted(pool, key=_score, reverse=True)[: int(n)]
+    return [_matrix_row_key(r) for r in ranked]
+
+
+def _matrix_hard_top_overlap(
+    rows: list[dict] | None,
+    *,
+    n: int = 5,
+) -> int:
+    """How many of top-N by week_ret also appear in top-N by week+prior."""
+    a = set(_matrix_hard_top_keys(rows, n=n, dual_composite=False))
+    b = set(_matrix_hard_top_keys(rows, n=n, dual_composite=True))
+    return len(a & b)
+
+
+def _matrix_soft_pick(rows: list[dict] | None, *, cap: int) -> list[dict]:
+    """Top soft cells by week_ret with TF diversity (best-per-TF first, then fill).
+
+    Raw top-N is often 100% one TF×strategy; soft still needs other TFs checked.
+    """
+    pool = [r for r in (rows or []) if r and not r.get("skip") and r.get("dense_ok")]
+    pool = sorted(
+        pool,
+        key=lambda r: float(r.get("week_ret")) if r.get("week_ret") is not None else -999.0,
+        reverse=True,
+    )
+    cap_i = max(0, int(cap))
+    if cap_i <= 0 or not pool:
+        return []
+    picked: list[dict] = []
+    seen_tf: set[str] = set()
+    seen_key: set[tuple[str, int]] = set()
+    for r in pool:
+        tf = str(r.get("tf") or "")
+        if tf in seen_tf:
+            continue
+        picked.append(r)
+        seen_tf.add(tf)
+        seen_key.add(_matrix_row_key(r))
+        if len(picked) >= cap_i:
+            return picked
+    for r in pool:
+        k = _matrix_row_key(r)
+        if k in seen_key:
+            continue
+        picked.append(r)
+        seen_key.add(k)
+        if len(picked) >= cap_i:
+            break
+    return picked
+
+
+def _book_leverage_bakeoff(
+    rows: list[dict] | None,
+    *,
+    strategy: str,
+    timeframe: str,
+) -> list[dict]:
+    """Same strategy + candle size, one cell per leverage (lev sensitivity of the book).
+
+    Not "best holdout TF per lev" — that mixes candle sizes and lies about leverage.
+    """
+    want_s = str(strategy or "").strip().lower()
+    want_tf = str(timeframe or "").strip().lower()
+    by_lev: dict[int, dict] = {}
+    for r in rows or []:
+        if not r or r.get("skip"):
+            continue
+        if str(r.get("strategy") or "").strip().lower() != want_s:
+            continue
+        # Matrix rows use "tf"; ladder snapshots use "timeframe".
+        tf = str(r.get("tf") or r.get("timeframe") or "").strip().lower()
+        if tf != want_tf:
+            continue
+        lev = int(r.get("leverage") or 0)
+        if lev <= 0:
+            continue
+        by_lev[lev] = r
+    out = []
+    for lev in sorted(by_lev):
+        row = dict(by_lev[lev])
+        # Normalize keys for the Live UI ladder.
+        row["leverage"] = lev
+        row["timeframe"] = want_tf
+        row["strategy"] = want_s
+        if "week_ret" in row and row.get("week_ret") is not None:
+            row["week_ret"] = float(row["week_ret"])
+        out.append(row)
+    return out
+
+
 def _rank_matrix_rows(rows: list[dict] | None) -> dict | None:
     """Best robust, non-skipped row by holdout week_ret."""
     best = None
@@ -1720,6 +1928,56 @@ def _period_robust_ok(
     return True, "period_robust"
 
 
+def _escape_window_ok(
+    cand_week: dict | None,
+    cand_oos: float,
+    cand_soft: float | None,
+    base_week: dict | None,
+    base_oos: float,
+    base_soft: float | None,
+) -> tuple[bool, str]:
+    """Survive-first escape gate: leave a death book only if longer windows improve.
+
+    Requires absolute wipeout floors + relative OOS/soft vs Live. Holdout week
+    alone is never enough (week-led escape deleted).
+    """
+    try:
+        oos = float(cand_oos)
+        base_o = float(base_oos)
+    except (TypeError, ValueError):
+        return False, "escape_oos_missing"
+    soft = cand_soft if cand_soft is not None else oos
+    base_s = base_soft if base_soft is not None else base_o
+    try:
+        soft = float(soft)
+        base_s = float(base_s)
+    except (TypeError, ValueError):
+        return False, "escape_soft_missing"
+    try:
+        week = float((cand_week or {}).get("ret") or 0)
+        base_w = float((base_week or {}).get("ret") or 0)
+    except (TypeError, ValueError):
+        return False, "escape_week_missing"
+
+    oos_floor = float(HUNT_TARGETS.get("escape_oos_floor", -0.25))
+    soft_floor = float(HUNT_TARGETS.get("escape_soft_floor", -0.25))
+    rel_oos = float(HUNT_TARGETS.get("escape_rel_oos_pp", 0.02))
+    rel_soft = float(HUNT_TARGETS.get("escape_rel_soft_pp", 0.02))
+    week_slack = float(HUNT_TARGETS.get("escape_week_slack_pp", 0.05))
+
+    if oos < oos_floor:
+        return False, f"escape_oos {oos:+.0%} < floor {oos_floor:+.0%}"
+    if soft < soft_floor:
+        return False, f"escape_soft {soft:+.0%} < floor {soft_floor:+.0%}"
+    if oos < base_o + rel_oos:
+        return False, f"escape_oos {oos:+.0%} < live {base_o:+.0%}+{rel_oos:.0%}"
+    if soft < base_s + rel_soft:
+        return False, f"escape_soft {soft:+.0%} < live {base_s:+.0%}+{rel_soft:.0%}"
+    if week < base_w - week_slack:
+        return False, f"escape_week {week:+.0%} < live {base_w:+.0%}-{week_slack:.0%}"
+    return True, "escape_windows_ok"
+
+
 def _forward_record(symbols: list, since_iso: str) -> dict:
     """Closed PAPER trades since the strategy went live in paper — the only proof that isn't a backtest."""
     n, pnl, wins = 0, 0.0, 0
@@ -1816,24 +2074,45 @@ def _rank_key(
     oos: BacktestResult,
     soft_oos: Optional[BacktestResult] = None,
     week: Optional[dict] = None,
+    *,
+    fold: Optional[dict] = None,
+    cost_ok: bool = True,
+    roi: float | None = None,
 ) -> tuple:
+    """Hunt sort: p25 fold Sortino → cost_ok → ROI; week is trailing diagnostic only.
+
+    Dashboard week / +100% goal remains in ``_grade`` for Live display — not primary here.
     """
-    Primary sort = quality /100 the user sees (now includes $ return + soft-run).
-    Holdout week return is part of the key when supplied (F1).
-    """
-    g = _grade(ins, oos, soft_oos, week=week)
+    import math
+
     soft_ret = float(soft_oos.total_return) if soft_oos is not None else float(oos.total_return)
     week_ret = float((week or {}).get("ret") or -999.0)
+    try:
+        p25 = float((fold or {}).get("p25_sortino"))
+    except (TypeError, ValueError):
+        p25 = float("nan")
+    if not math.isfinite(p25):
+        p25 = -999.0
+    cost_i = 1 if cost_ok else 0
+    if roi is None:
+        try:
+            roi = float((fold or {}).get("roi"))
+        except (TypeError, ValueError):
+            roi = None
+    if roi is None or not math.isfinite(float(roi)):
+        roi = float(oos.total_return)
+    g = _grade(ins, oos, soft_oos, week=week)
     return (
-        int(g.get("score_raw", g["score"])),  # hunt on uncapped research quality
-        week_ret,
-        float(oos.total_return),
+        float(p25),
+        int(cost_i),
+        float(roi),
+        week_ret,  # diagnostic only (after fold/cost/roi)
+        int(g.get("score_raw", g["score"])),
         soft_ret,
         float(oos.win_rate),
         float(oos.expectancy_r),
         int(oos.trades),
         -float(oos.max_drawdown),
-        _score(ins, oos, soft_oos),
     )
 
 
@@ -1846,9 +2125,17 @@ def _beats(
     b_soft: Optional[BacktestResult] = None,
     a_week: Optional[dict] = None,
     b_week: Optional[dict] = None,
+    a_fold: Optional[dict] = None,
+    b_fold: Optional[dict] = None,
+    a_cost_ok: bool = True,
+    b_cost_ok: bool = True,
+    a_roi: float | None = None,
+    b_roi: float | None = None,
 ) -> bool:
-    """True if A is strictly better than B for hunting."""
-    return _rank_key(a_i, a_o, a_soft, a_week) > _rank_key(b_i, b_o, b_soft, b_week)
+    """True if A is strictly better than B for hunting (fold-primary)."""
+    return _rank_key(
+        a_i, a_o, a_soft, a_week, fold=a_fold, cost_ok=a_cost_ok, roi=a_roi
+    ) > _rank_key(b_i, b_o, b_soft, b_week, fold=b_fold, cost_ok=b_cost_ok, roi=b_roi)
 
 
 def _grade(
@@ -1863,7 +2150,8 @@ def _grade(
 ) -> dict:
     """0–100 score vs HUNT_TARGETS + checklist for the Live page.
 
-    Primary money bar is 7-day return when `week` is supplied.
+    Dashboard primary money bar is holdout week when `week` is supplied (+100% goal).
+    Hunt *search* ranking uses p25 fold Sortino via ``_rank_key`` — not this score.
     wf: walk-forward (unseen history) result. When required and missing/failed the
     targets cannot be met and the displayed score is capped at 60.
     """
@@ -2050,13 +2338,20 @@ def _is_climb_ok(
     return cand_o.expectancy_r > -0.05
 
 
-def _discover_seed_cfgs(base: Config, generation: int, held: int) -> list:
+def _discover_seed_cfgs(
+    base: Config,
+    generation: int,
+    held: int,
+    *,
+    hunt_exhausted: bool = False,
+) -> list:
     """Inject momentum_rule / combo_or seeds from .moonshot_rules.json when stuck.
 
     Discover uses different barrier exits — we only take the strategy family tip;
     BacktestEngine re-validation in the hunt loop is the real gate.
+    Exhausted: inject every pass.
     """
-    if held < 8 and (generation % 11 != 0):
+    if not hunt_exhausted and held < 8 and (generation % 11 != 0):
         return []
     path = RULES_PATH
     if not path.exists():

@@ -297,6 +297,12 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
 }
 .ms-stat-hint { color: #848E9C; font-size: 0.75rem; margin-top: 0.25rem; }
 .ms-stat.accent .ms-stat-value { color: #F0B90B; }
+.ms-stat.up .ms-stat-value { color: #0ECB81; }
+.ms-stat.down .ms-stat-value { color: #F6465D; }
+.ms-stat.warn .ms-stat-value { color: #F0B90B; }
+.ms-stat.up { border-color: #0ECB8133; }
+.ms-stat.down { border-color: #F6465D33; }
+.ms-stat.warn { border-color: #F0B90B33; }
 .ms-stat.good .ms-stat-value { color: #0ECB81; }
 .ms-stat.bad .ms-stat-value { color: #F6465D; }
 .ms-section {
@@ -491,14 +497,15 @@ def page_setup(title: str = "") -> None:
 
 
 def _status_item(label: str, value_html: str) -> str:
-    return (
-        f'<span class="ms-status-item">'
-        f'<span class="lbl">{label}</span>{value_html}</span>'
-    )
+    return f'<span class="ms-status-item"><span class="lbl">{label}</span>{value_html}</span>'
 
 
-def topbar(balance: Optional[float] = None, score: Optional[int] = None,
-           mode: str = "PAPER", active: Optional[str] = None) -> None:
+def topbar(
+    balance: Optional[float] = None,
+    score: Optional[int] = None,
+    mode: str = "PAPER",
+    active: Optional[str] = None,
+) -> None:
     """Exchange-style ticker under native top nav — fills the strip with live book stats."""
     _ = active  # page highlight is handled by st.navigation(position="top")
 
@@ -606,7 +613,10 @@ def topbar(balance: Optional[float] = None, score: Optional[int] = None,
             pass_n = int((state.get("hunt_event") or {}).get("generation") or 0)
         except (TypeError, ValueError):
             pass_n = 0
-    busy = bool(state.get("busy")) or str((state.get("hunt_event") or {}).get("kind") or "") == "improve_start"
+    busy = (
+        bool(state.get("busy"))
+        or str((state.get("hunt_event") or {}).get("kind") or "") == "improve_start"
+    )
     age = heartbeat_age(eq_m)
 
     # ---- left: mode badges ----
@@ -655,7 +665,11 @@ def topbar(balance: Optional[float] = None, score: Optional[int] = None,
     else:
         right.append(_status_item("Hunt", "<b>—</b>"))
     hb = format_age(age)
-    hb_cls = "up" if heartbeat_kind(age) == "ok" else ("warn" if heartbeat_kind(age) == "muted" else "down")
+    hb_cls = (
+        "up"
+        if heartbeat_kind(age) == "ok"
+        else ("warn" if heartbeat_kind(age) == "muted" else "down")
+    )
     right.append(_status_item("Pulse", f'<b class="{hb_cls}">{hb}</b>'))
 
     mid_html = '<span class="sep"> · </span>'.join(mid)
@@ -706,9 +720,11 @@ def empty_state(msg: str, hint: str = "") -> None:
 
 def chip_row(items: list[tuple[str, str]]) -> None:
     """items: list of (label, kind) where kind in ok|warn|muted|busy|''."""
-    html = '<div class="ms-strip">' + "".join(
-        f'<span class="ms-chip {kind}">{label}</span>' for label, kind in items
-    ) + "</div>"
+    html = (
+        '<div class="ms-strip">'
+        + "".join(f'<span class="ms-chip {kind}">{label}</span>' for label, kind in items)
+        + "</div>"
+    )
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -761,8 +777,14 @@ def hero_panel(level: str, headline: str, detail: str, stats: list[dict]) -> Non
     level: ok|warn|bad|info
     stats: [{label, value, hint?, tone?}] tone in accent|good|bad|''
     """
-    klass = {"ok": "ok", "success": "ok", "warn": "warn", "warning": "warn",
-             "bad": "bad", "error": "bad"}.get(level, "")
+    klass = {
+        "ok": "ok",
+        "success": "ok",
+        "warn": "warn",
+        "warning": "warn",
+        "bad": "bad",
+        "error": "bad",
+    }.get(level, "")
     tiles = []
     for s in stats:
         tone = s.get("tone", "")
@@ -771,7 +793,7 @@ def hero_panel(level: str, headline: str, detail: str, stats: list[dict]) -> Non
             f'<div class="ms-stat {tone}">'
             f'<div class="ms-stat-label">{s["label"]}</div>'
             f'<div class="ms-stat-value">{s["value"]}</div>'
-            f'{hint}</div>'
+            f"{hint}</div>"
         )
     n = max(2, min(len(stats) or 2, 6))
     grid = f"ms-stat-grid cols-{n}" if n != 4 else "ms-stat-grid"
@@ -814,8 +836,8 @@ def goal_rows(items: list[dict]) -> None:
             f'<div class="ms-goal {row_klass}">'
             f'<div><div class="ms-goal-title">{mark} {it["title"]}</div>'
             f'<div class="ms-goal-detail">{it.get("detail", "")}</div></div>'
-            f'<div class="ms-goal-bar"><div class="ms-goal-fill {fill}" style="width:{pct*100:.0f}%"></div></div>'
-            f'<div class="ms-goal-pct">{pct*100:.0f}%</div>'
+            f'<div class="ms-goal-bar"><div class="ms-goal-fill {fill}" style="width:{pct * 100:.0f}%"></div></div>'
+            f'<div class="ms-goal-pct">{pct * 100:.0f}%</div>'
             f"</div>"
         )
     st.markdown("".join(blocks), unsafe_allow_html=True)
@@ -877,9 +899,35 @@ def load_trades(mode: Optional[str] = None, path: Path = DB_PATH) -> pd.DataFram
     if not cols:
         return pd.DataFrame()
     # exit may need quoting
-    wanted = ["ts", "symbol", "direction", "entry", "exit", "qty", "pnl", "r_multiple",
-              "liquidated", "exit_reason", "adds", "fees", "funding",
-              "entry_time", "partial_taken", "mode"]
+    wanted = [
+        "ts",
+        "symbol",
+        "direction",
+        "entry",
+        "exit",
+        "qty",
+        "pnl",
+        "r_multiple",
+        "liquidated",
+        "exit_reason",
+        "adds",
+        "fees",
+        "funding",
+        "entry_time",
+        "partial_taken",
+        "mode",
+        "config_hash",
+        "open_config_hash",
+        "initial_risk_dollars",
+        "intended_qty",
+        "filled_qty",
+        "slippage_bps",
+        "assumed_slippage_bps",
+        "funding_rate_entry",
+        "mae_r",
+        "mfe_r",
+        "bars_held",
+    ]
     select = []
     for c in wanted:
         if c not in cols:
@@ -897,7 +945,10 @@ def load_trades(mode: Optional[str] = None, path: Path = DB_PATH) -> pd.DataFram
     df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601", errors="coerce")
     if "entry_time" in df.columns:
         df["entry_time"] = pd.to_datetime(
-            df["entry_time"], utc=True, format="ISO8601", errors="coerce",
+            df["entry_time"],
+            utc=True,
+            format="ISO8601",
+            errors="coerce",
         )
     else:
         df["entry_time"] = pd.NaT
@@ -923,10 +974,32 @@ def load_positions() -> dict:
 
 
 def load_risk(mode: Optional[str] = None) -> Optional[dict]:
-    q = """SELECT ts, mode, equity, peak, drawdown, halt_reason, kill, streak,
-                  daily_halt, pause_until FROM risk_snapshot"""
+    cols = _table_cols(DB_PATH, "risk_snapshot")
+    if not cols:
+        return None
+    wanted = [
+        "ts",
+        "mode",
+        "equity",
+        "peak",
+        "drawdown",
+        "halt_reason",
+        "kill",
+        "streak",
+        "daily_halt",
+        "pause_until",
+        "effective_lev",
+        "net_lev",
+        "margin_used",
+        "free_margin",
+        "min_liq_distance_pct",
+        "config_hash",
+        "feed_age_s",
+    ]
+    select = [c for c in wanted if c in cols]
+    q = f"SELECT {', '.join(select)} FROM risk_snapshot"
     args: list = []
-    if mode:
+    if mode and "mode" in cols:
         q += " WHERE mode=?"
         args.append(mode)
     q += " ORDER BY ts DESC LIMIT 1"
@@ -937,6 +1010,212 @@ def load_risk(mode: Optional[str] = None) -> Optional[dict]:
     if df.empty:
         return None
     return df.iloc[0].to_dict()
+
+
+def load_cycle_snapshots(mode: Optional[str] = None, limit: int = 300) -> pd.DataFrame:
+    """Golden: SELECT ts, effective_lev, net_lev, feed_age_s, config_hash, halt_reason
+    FROM cycle_snapshot ORDER BY ts DESC LIMIT N"""
+    cols = _table_cols(DB_PATH, "cycle_snapshot")
+    if not cols:
+        return pd.DataFrame()
+    wanted = [
+        "ts",
+        "mode",
+        "equity",
+        "peak",
+        "drawdown",
+        "effective_lev",
+        "net_lev",
+        "open_symbols",
+        "pause_until",
+        "halt_reason",
+        "kill",
+        "config_hash",
+        "feed_age_s",
+        "cycle_id",
+    ]
+    select = [c for c in wanted if c in cols]
+    q = f"SELECT {', '.join(select)} FROM cycle_snapshot"
+    args: list = []
+    if mode and "mode" in cols:
+        q += " WHERE mode=?"
+        args.append(mode)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    try:
+        df = _read_sql(q, tuple(args))
+    except Exception:
+        return pd.DataFrame()
+    if not df.empty:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601", errors="coerce")
+    return df
+
+
+def load_expectancy_rollups(mode: Optional[str] = None, limit: int = 40) -> pd.DataFrame:
+    """Golden: latest paper edge by config_hash with bootstrap CI."""
+    cols = _table_cols(DB_PATH, "expectancy_rollup")
+    if not cols:
+        return pd.DataFrame()
+    wanted = [
+        "ts",
+        "mode",
+        "config_hash",
+        "n",
+        "mean_r",
+        "ci_low",
+        "ci_high",
+        "cost_share",
+        "max_dd",
+        "liquidations",
+        "label",
+    ]
+    select = [c for c in wanted if c in cols]
+    q = f"SELECT {', '.join(select)} FROM expectancy_rollup"
+    args: list = []
+    if mode and "mode" in cols:
+        q += " WHERE mode=?"
+        args.append(mode)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    try:
+        df = _read_sql(q, tuple(args))
+    except Exception:
+        return pd.DataFrame()
+    if not df.empty:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601", errors="coerce")
+    return df
+
+
+def load_fill_events(mode: Optional[str] = None, limit: int = 200) -> pd.DataFrame:
+    df = load_events(mode=mode, limit=max(limit * 3, 300))
+    if df.empty:
+        return df
+    fills = df[df["kind"] == "fill"].head(limit).copy()
+    if fills.empty:
+        return fills
+    payloads = []
+    for raw in fills["payload"].tolist():
+        try:
+            payloads.append(json.loads(raw) if isinstance(raw, str) else (raw or {}))
+        except Exception:
+            payloads.append({})
+    for key in (
+        "intended_qty",
+        "filled_qty",
+        "ref_price",
+        "fill_price",
+        "slippage_bps",
+        "assumed_slippage_bps",
+        "side",
+        "reason",
+    ):
+        fills[key] = [p.get(key) for p in payloads]
+    return fills
+
+
+def load_audit_events(limit: int = 50) -> pd.DataFrame:
+    kinds = (
+        "promote",
+        "rotate",
+        "freeze",
+        "unfreeze",
+        "restart",
+        "rehydrate",
+        "equity_stale_cleared",
+    )
+    df = load_events(mode=None, limit=800)
+    if df.empty:
+        return df
+    out = df[df["kind"].isin(kinds)].head(limit).copy()
+    payloads = []
+    for raw in out["payload"].tolist():
+        try:
+            payloads.append(json.loads(raw) if isinstance(raw, str) else (raw or {}))
+        except Exception:
+            payloads.append({})
+    out["reason"] = [p.get("reason") for p in payloads]
+    out["old_hash"] = [p.get("old_hash") for p in payloads]
+    out["new_hash"] = [p.get("new_hash") for p in payloads]
+    out["frozen"] = [p.get("frozen") for p in payloads]
+    out["generation"] = [p.get("generation") for p in payloads]
+    return out
+
+
+def load_hunt_pass_runs(limit: int = 30) -> pd.DataFrame:
+    """Read experiments.db hunt_pass rows for funnel / kill trends."""
+    from moonshot.paths import ROOT
+
+    path = ROOT / "runs" / "experiments.db"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        from moonshot.experiment_log import get_runs
+
+        rows = get_runs({"kind": "hunt_pass"}, db_path=path)
+    except Exception:
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    rows = sorted(rows, key=lambda r: str(r.get("started_ts") or ""), reverse=True)[:limit]
+    flat = []
+    for r in rows:
+        metrics = r.get("metrics") or r.get("metrics_json") or {}
+        if isinstance(metrics, str):
+            try:
+                metrics = json.loads(metrics)
+            except Exception:
+                metrics = {}
+        meta = r.get("meta") or r.get("meta_json") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        funnel = metrics.get("funnel") or {}
+        flat.append(
+            {
+                "ts": r.get("started_ts"),
+                "run_id": r.get("run_id"),
+                "config_hash": r.get("config_hash"),
+                "generation": meta.get("generation"),
+                "promote": funnel.get("promote"),
+                "scout_in": funnel.get("scout_in"),
+                "scout_keep": funnel.get("scout_keep"),
+                "confirm_soft": funnel.get("confirm_soft"),
+                "matrix_scored": funnel.get("matrix_scored"),
+                "gates_pass": funnel.get("gates_pass"),
+                "promote_reason": meta.get("promote_reason"),
+                "material_why": meta.get("material_why"),
+                "kill_histogram": metrics.get("kill_histogram"),
+                "leverage_ladder": metrics.get("leverage_ladder"),
+                "timing": metrics.get("timing"),
+                "cache": metrics.get("cache"),
+                "sealed_holdout": metrics.get("sealed_holdout"),
+            }
+        )
+    return pd.DataFrame(flat)
+
+
+def load_rejected_entries(mode: Optional[str] = None, limit: int = 100) -> pd.DataFrame:
+    cols = _table_cols(DB_PATH, "rejected_entries")
+    if not cols:
+        return pd.DataFrame()
+    wanted = ["ts", "mode", "symbol", "direction", "entry", "stop", "reason"]
+    select = [c for c in wanted if c in cols]
+    q = f"SELECT {', '.join(select)} FROM rejected_entries"
+    args: list = []
+    if mode and "mode" in cols:
+        q += " WHERE mode=?"
+        args.append(mode)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    try:
+        df = _read_sql(q, tuple(args))
+    except Exception:
+        return pd.DataFrame()
+    if not df.empty and "ts" in df.columns:
+        df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601", errors="coerce")
+    return df
 
 
 def load_events(mode: Optional[str] = None, limit: int = 200) -> pd.DataFrame:
@@ -1022,8 +1301,12 @@ PLOTLY_CONFIG: dict = {
     "scrollZoom": True,
     "doubleClick": "reset",
     "modeBarButtonsToRemove": [
-        "lasso2d", "select2d", "autoScale2d",
-        "toggleSpikelines", "hoverClosestCartesian", "hoverCompareCartesian",
+        "lasso2d",
+        "select2d",
+        "autoScale2d",
+        "toggleSpikelines",
+        "hoverClosestCartesian",
+        "hoverCompareCartesian",
     ],
 }
 
@@ -1035,8 +1318,7 @@ def is_mobile() -> bool:
     except Exception:
         ua = ""
     return any(
-        token in ua
-        for token in ("iphone", "ipod", "android", "mobile", "ipad", "opera mini")
+        token in ua for token in ("iphone", "ipod", "android", "mobile", "ipad", "opera mini")
     )
 
 
@@ -1126,9 +1408,14 @@ def _plotly_plain_json(fig: go.Figure) -> str:
     import numpy as np
 
     _DTYPE = {
-        "f8": "<f8", "f4": "<f4",
-        "i1": "i1", "i2": "<i2", "i4": "<i4",
-        "u1": "u1", "u2": "<u2", "u4": "<u4",
+        "f8": "<f8",
+        "f4": "<f4",
+        "i1": "i1",
+        "i2": "<i2",
+        "i4": "<i4",
+        "u1": "u1",
+        "u2": "<u2",
+        "u4": "<u4",
     }
 
     def _expand(obj):
@@ -1301,13 +1588,19 @@ def plotly_layout(*, kind: str = "time", **kwargs) -> dict:
     uirev = kwargs.pop("uirevision", "moonshot")
     time_mode = kind != "free"
     xaxis = dict(
-        gridcolor=GRID, zeroline=False, showline=True, linecolor=BORDER,
+        gridcolor=GRID,
+        zeroline=False,
+        showline=True,
+        linecolor=BORDER,
         fixedrange=False,
         rangeslider=dict(visible=False),
         rangeselector=None,
     )
     yaxis = dict(
-        gridcolor=GRID, zeroline=False, showline=True, linecolor=BORDER,
+        gridcolor=GRID,
+        zeroline=False,
+        showline=True,
+        linecolor=BORDER,
         fixedrange=bool(time_mode),
         autorange=False if time_mode else True,
     )
@@ -1377,49 +1670,59 @@ def equity_drawdown_fig(equity: pd.DataFrame) -> go.Figure:
         peak_vals.append(running)
     last, start = vals[-1], vals[0]
     color = GREEN if last >= start else RED
-    fig.add_trace(go.Scatter(
-        x=ts, y=peak_vals, name="Peak",
-        line=dict(color="rgba(139,147,167,0.35)", width=1, dash="dot"),
-        hovertemplate="Peak $%{y:.2f}<extra></extra>",
-        showlegend=False,
-    ))
-    fig.add_trace(go.Scatter(
-        x=ts, y=vals, name="Live wallet",
-        line=dict(color=color, width=2.4),
-        fill="tonexty",
-        fillcolor="rgba(184,92,92,0.10)",
-        hovertemplate="Wallet $%{y:.2f}<extra></extra>",
-        showlegend=False,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=ts,
+            y=peak_vals,
+            name="Peak",
+            line=dict(color="rgba(139,147,167,0.35)", width=1, dash="dot"),
+            hovertemplate="Peak $%{y:.2f}<extra></extra>",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=ts,
+            y=vals,
+            name="Live wallet",
+            line=dict(color=color, width=2.4),
+            fill="tonexty",
+            fillcolor="rgba(184,92,92,0.10)",
+            hovertemplate="Wallet $%{y:.2f}<extra></extra>",
+            showlegend=False,
+        )
+    )
     y_range = _y_range_for_window(vals, peak_vals, pad_frac=0.12)
     # Time-only zoom (pan/scroll); price axis framed to series — not photo-pinch
     # No x-axis title: tick labels already show dates; a title collides with them.
     # No vertical y-axis title — section header already says "wallet"; a rotated
     # label at tight left margin collides with 4-digit tick numbers.
-    fig.update_layout(**plotly_layout(
-        kind="time",
-        uirevision="equity-balance",
-        title=None,
-        margin=dict(l=64, r=16, t=8, b=64),
-        yaxis=dict(
+    fig.update_layout(
+        **plotly_layout(
+            kind="time",
+            uirevision="equity-balance",
             title=None,
-            range=y_range,
-            fixedrange=True,
-            tickfont=dict(size=11),
-            automargin=False,
-        ),
-        xaxis=dict(
-            title=None,
-            fixedrange=False,
-            tickangle=0,
-            nticks=5,
-            ticks="outside",
-            ticklen=4,
-            tickfont=dict(size=11),
-        ),
-        height=chart_height(400, 280),
-        showlegend=False,
-    ))
+            margin=dict(l=64, r=16, t=8, b=64),
+            yaxis=dict(
+                title=None,
+                range=y_range,
+                fixedrange=True,
+                tickfont=dict(size=11),
+                automargin=False,
+            ),
+            xaxis=dict(
+                title=None,
+                fixedrange=False,
+                tickangle=0,
+                nticks=5,
+                ticks="outside",
+                ticklen=4,
+                tickfont=dict(size=11),
+            ),
+            height=chart_height(400, 280),
+            showlegend=False,
+        )
+    )
     return polish_fig(fig)
 
 
@@ -1468,8 +1771,9 @@ def _snap_to_index(ts: pd.Timestamp, idx: pd.DatetimeIndex) -> pd.Timestamp:
     return pd.Timestamp(idx[pos])
 
 
-def _align_trades_to_candles(trades: pd.DataFrame, df: pd.DataFrame,
-                             bar: pd.Timedelta) -> pd.DataFrame:
+def _align_trades_to_candles(
+    trades: pd.DataFrame, df: pd.DataFrame, bar: pd.Timedelta
+) -> pd.DataFrame:
     """Snap each trade to candle bars (no visual x-stagger — that caused the spider mess)."""
     if trades is None or trades.empty or df.empty:
         return pd.DataFrame()
@@ -1509,7 +1813,7 @@ def _align_trades_to_candles(trades: pd.DataFrame, df: pd.DataFrame,
         if pd.isna(entry_bar):
             pos_x = int(idx.searchsorted(exit_bar, side="left"))
             lo = max(0, pos_x - 4)
-            window = df.iloc[lo: pos_x + 1]
+            window = df.iloc[lo : pos_x + 1]
             entry_bar = exit_bar
             if not window.empty and "open" in window.columns:
                 err = (window["open"].astype(float) - float(ep)).abs()
@@ -1527,14 +1831,16 @@ def _align_trades_to_candles(trades: pd.DataFrame, df: pd.DataFrame,
         d = str(row.get("direction", "")).lower()
         is_long = d in ("long", "buy")
 
-        rows.append({
-            **row.to_dict(),
-            "entry_bar": entry_bar,
-            "exit_bar": exit_bar,
-            "bars_held": bars_held,
-            "same_bar": same,
-            "is_long": is_long,
-        })
+        rows.append(
+            {
+                **row.to_dict(),
+                "entry_bar": entry_bar,
+                "exit_bar": exit_bar,
+                "bars_held": bars_held,
+                "same_bar": same,
+                "is_long": is_long,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -1622,11 +1928,18 @@ def _marker_stacks(
             esym = "triangle-down"
             ecol = RED
             ename = "Short"
-        entries.append({
-            "x": eb + half, "y": ey, "px": ep, "sym": esym, "color": ecol,
-            "name": ename, "bars": int(row.get("bars_held") or 0),
-            "same": bool(row.get("same_bar")),
-        })
+        entries.append(
+            {
+                "x": eb + half,
+                "y": ey,
+                "px": ep,
+                "sym": esym,
+                "color": ecol,
+                "name": ename,
+                "bars": int(row.get("bars_held") or 0),
+                "same": bool(row.get("same_bar")),
+            }
+        )
 
         # Exit: opposite side of the bar (closes the position)
         x_slot = exit_counts.get(xb, 0)
@@ -1642,12 +1955,19 @@ def _marker_stacks(
         else:
             # cover short → buy marker below
             xy = lo - pad * (1.15 + 0.85 * x_slot)
-        exits.append({
-            "x": xb + half, "y": xy, "px": xp, "pnl": pnl, "reason": reason,
-            "win": pnl >= 0, "bars": int(row.get("bars_held") or 0),
-            "same": bool(row.get("same_bar")),
-            "name": "Exit",
-        })
+        exits.append(
+            {
+                "x": xb + half,
+                "y": xy,
+                "px": xp,
+                "pnl": pnl,
+                "reason": reason,
+                "win": pnl >= 0,
+                "bars": int(row.get("bars_held") or 0),
+                "same": bool(row.get("same_bar")),
+                "name": "Exit",
+            }
+        )
 
     return pd.DataFrame(entries), pd.DataFrame(exits)
 
@@ -1667,9 +1987,14 @@ def entries_exits_fig(
     """
     empty = go.Figure()
     if ohlcv is None or ohlcv.empty:
-        empty.update_layout(**plotly_layout(
-            kind="time", height=480, title="No price data", uirevision="entries-empty",
-        ))
+        empty.update_layout(
+            **plotly_layout(
+                kind="time",
+                height=480,
+                title="No price data",
+                uirevision="entries-empty",
+            )
+        )
         return empty
 
     df = _ohlcv_frame(ohlcv).tail(int(max_bars))
@@ -1690,17 +2015,25 @@ def entries_exits_fig(
     )
 
     # Slightly translucent bodies read more like TV/MEXC than solid blocks
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        name="Price",
-        increasing_line_color=GREEN, decreasing_line_color=RED,
-        increasing_fillcolor="rgba(14,203,129,0.85)",
-        decreasing_fillcolor="rgba(246,70,93,0.85)",
-        whiskerwidth=0.35,
-        line=dict(width=1),
-        showlegend=False,
-    ), row=1, col=1)
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="Price",
+            increasing_line_color=GREEN,
+            decreasing_line_color=RED,
+            increasing_fillcolor="rgba(14,203,129,0.85)",
+            decreasing_fillcolor="rgba(246,70,93,0.85)",
+            whiskerwidth=0.35,
+            line=dict(width=1),
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
 
     view_df = df.loc[(df.index >= x0 - bar) & (df.index <= x1)]
     if view_df.empty:
@@ -1708,7 +2041,9 @@ def entries_exits_fig(
     span = float(view_df["high"].max() - view_df["low"].min())
     pad = max(span * 0.035, float(view_df["close"].iloc[-1]) * 1e-4)
 
-    entries_m, exits_m = _marker_stacks(t, df, bar, pad) if not t.empty else (pd.DataFrame(), pd.DataFrame())
+    entries_m, exits_m = (
+        _marker_stacks(t, df, bar, pad) if not t.empty else (pd.DataFrame(), pd.DataFrame())
+    )
 
     # Legend: one trace per kind (no per-trade lines)
     if not entries_m.empty:
@@ -1719,22 +2054,29 @@ def entries_exits_fig(
             sub = entries_m[entries_m["name"] == name]
             if sub.empty:
                 continue
-            fig.add_trace(go.Scatter(
-                x=sub["x"], y=sub["y"],
-                mode="markers",
-                name=f"{name} entry",
-                marker=dict(
-                    symbol=sym, size=11, color=color,
-                    line=dict(width=1, color="#EAECEF"),
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["x"],
+                    y=sub["y"],
+                    mode="markers",
+                    name=f"{name} entry",
+                    marker=dict(
+                        symbol=sym,
+                        size=11,
+                        color=color,
+                        line=dict(width=1, color="#EAECEF"),
+                    ),
+                    customdata=sub[["px", "bars"]].to_numpy(),
+                    hovertemplate=(
+                        f"<b>{name} entry</b><br>"
+                        "Fill %{customdata[0]:.6g}<br>"
+                        "Bars held %{customdata[1]}"
+                        "<extra></extra>"
+                    ),
                 ),
-                customdata=sub[["px", "bars"]].to_numpy(),
-                hovertemplate=(
-                    f"<b>{name} entry</b><br>"
-                    "Fill %{customdata[0]:.6g}<br>"
-                    "Bars held %{customdata[1]}"
-                    "<extra></extra>"
-                ),
-            ), row=1, col=1)
+                row=1,
+                col=1,
+            )
 
     if not exits_m.empty:
         for win, name, color in (
@@ -1744,38 +2086,46 @@ def entries_exits_fig(
             part = exits_m[exits_m["win"] == win]
             if part.empty:
                 continue
-            fig.add_trace(go.Scatter(
-                x=part["x"], y=part["y"],
-                mode="markers",
-                name=name,
-                marker=dict(
-                    symbol="circle", size=8, color=color,
-                    line=dict(width=1.5, color="#EAECEF"),
+            fig.add_trace(
+                go.Scatter(
+                    x=part["x"],
+                    y=part["y"],
+                    mode="markers",
+                    name=name,
+                    marker=dict(
+                        symbol="circle",
+                        size=8,
+                        color=color,
+                        line=dict(width=1.5, color="#EAECEF"),
+                    ),
+                    customdata=part[["px", "pnl", "reason", "bars"]].to_numpy(),
+                    hovertemplate=(
+                        "<b>Exit</b> %{customdata[0]:.6g}<br>"
+                        "P&L %{customdata[1]:+.2f}<br>"
+                        "%{customdata[2]}<br>"
+                        "Bars %{customdata[3]}"
+                        "<extra></extra>"
+                    ),
                 ),
-                customdata=part[["px", "pnl", "reason", "bars"]].to_numpy(),
-                hovertemplate=(
-                    "<b>Exit</b> %{customdata[0]:.6g}<br>"
-                    "P&L %{customdata[1]:+.2f}<br>"
-                    "%{customdata[2]}<br>"
-                    "Bars %{customdata[3]}"
-                    "<extra></extra>"
-                ),
-            ), row=1, col=1)
+                row=1,
+                col=1,
+            )
 
     if has_vol:
-        colors = [
-            GREEN if float(c) >= float(o) else RED
-            for o, c in zip(df["open"], df["close"])
-        ]
-        fig.add_trace(go.Bar(
-            x=df.index,
-            y=df["volume"],
-            name="Volume",
-            marker=dict(color=colors, line=dict(width=0)),
-            opacity=0.45,
-            showlegend=False,
-            hovertemplate="Vol %{y:,.0f}<extra></extra>",
-        ), row=2, col=1)
+        colors = [GREEN if float(c) >= float(o) else RED for o, c in zip(df["open"], df["close"])]
+        fig.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df["volume"],
+                name="Volume",
+                marker=dict(color=colors, line=dict(width=0)),
+                opacity=0.45,
+                showlegend=False,
+                hovertemplate="Vol %{y:,.0f}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
 
     lows = list(view_df["low"].astype(float))
     highs = list(view_df["high"].astype(float))
@@ -1801,8 +2151,12 @@ def entries_exits_fig(
         title=dict(text=head, font=dict(size=13, color=MUTED)),
         margin=dict(l=16, r=64, t=48, b=24),
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, x=0,
-            bgcolor="rgba(0,0,0,0)", font=dict(size=11, color=MUTED),
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            x=0,
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(size=11, color=MUTED),
         ),
         hovermode="x unified",
         barmode="overlay",
@@ -1812,26 +2166,46 @@ def entries_exits_fig(
     # Shared time axis — rangeslider off on every x
     x_range = [pd.Timestamp(x0).isoformat(), pd.Timestamp(x1).isoformat()]
     fig.update_xaxes(
-        range=x_range, type="date", fixedrange=False,
-        rangeslider_visible=False, showgrid=True, gridcolor=GRID,
-        showticklabels=not has_vol, row=1, col=1,
+        range=x_range,
+        type="date",
+        fixedrange=False,
+        rangeslider_visible=False,
+        showgrid=True,
+        gridcolor=GRID,
+        showticklabels=not has_vol,
+        row=1,
+        col=1,
     )
     if has_vol:
         fig.update_xaxes(
-            range=x_range, type="date", fixedrange=False,
-            rangeslider_visible=False, showgrid=True, gridcolor=GRID,
-            row=2, col=1,
+            range=x_range,
+            type="date",
+            fixedrange=False,
+            rangeslider_visible=False,
+            showgrid=True,
+            gridcolor=GRID,
+            row=2,
+            col=1,
         )
         fig.update_yaxes(
-            fixedrange=True, side="right", showgrid=False,
-            title=None, row=2, col=1,
+            fixedrange=True,
+            side="right",
+            showgrid=False,
+            title=None,
+            row=2,
+            col=1,
         )
 
     fig.update_yaxes(
-        range=y_range, fixedrange=True, side="right",
-        showgrid=True, gridcolor=GRID, title=None,
+        range=y_range,
+        fixedrange=True,
+        side="right",
+        showgrid=True,
+        gridcolor=GRID,
+        title=None,
         tickfont=dict(size=11, color=MUTED),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     fig.update_traces(selector=dict(type="candlestick"), xaxis="x")
     return polish_fig(fig)
@@ -1908,11 +2282,30 @@ def results_display(df: pd.DataFrame) -> pd.DataFrame:
     out["max_dd"] = out["max_dd"].map(lambda x: f"{x:.0%}")
     out["win"] = out["win"].map(lambda x: f"{x:.0%}")
     out["pf"] = out["pf"].map(lambda x: "n/a" if pd.isna(x) else f"{x:.2f}")
-    return out.rename(columns={
-        "exp_r": "exp(R)", "max_dd": "maxDD", "cagr": "CAGR", "sharpe": "Sharpe",
-    })[
-        ["pyr", "part", "lev", "final", "ret", "CAGR", "Sharpe", "exp(R)",
-         "pf", "maxDD", "liq", "n", "win", "halt"]
+    return out.rename(
+        columns={
+            "exp_r": "exp(R)",
+            "max_dd": "maxDD",
+            "cagr": "CAGR",
+            "sharpe": "Sharpe",
+        }
+    )[
+        [
+            "pyr",
+            "part",
+            "lev",
+            "final",
+            "ret",
+            "CAGR",
+            "Sharpe",
+            "exp(R)",
+            "pf",
+            "maxDD",
+            "liq",
+            "n",
+            "win",
+            "halt",
+        ]
     ]
 
 
@@ -2049,6 +2442,12 @@ def paper_status_banner(
             "**Paused for today** after hitting the daily loss limit. "
             "It resumes automatically on the next UTC day."
         )
+    elif "bleed" in str(halt or "").lower():
+        st.warning(
+            "**BLEED HALT — entries paused** after a losing streak. "
+            "Hunt may still search/escape-swap the book; new entries stay off until a "
+            "robust promote clears the halt. Real money stays off."
+        )
     elif fresh:
         st.success(
             "**Practice mode is running** (fake money). Real money stays off. "
@@ -2116,7 +2515,7 @@ def load_practice_activity(limit: int = 80, scan_lines: int = 4000) -> list:
             lines = LIVE_FEED_PATH.read_text().splitlines()
         except Exception:
             lines = []
-        for line in reversed(lines[-int(scan_lines):]):
+        for line in reversed(lines[-int(scan_lines) :]):
             line = line.strip()
             if not line:
                 continue
@@ -2129,10 +2528,7 @@ def load_practice_activity(limit: int = 80, scan_lines: int = 4000) -> list:
             out.append(row)
             if len(out) >= int(limit):
                 break
-    have = {
-        (str(r.get("kind")), str(r.get("ts")), str(r.get("message") or "")[:40])
-        for r in out
-    }
+    have = {(str(r.get("kind")), str(r.get("ts")), str(r.get("message") or "")[:40]) for r in out}
     # Backfill opens/closes from DB — feed historically omitted them
     if len(out) < int(limit):
         try:
@@ -2166,12 +2562,14 @@ def load_practice_activity(limit: int = 80, scan_lines: int = 4000) -> list:
                         have.add(okey)
                 if len(out) >= int(limit):
                     break
+
     # Newest first
     def _ts_key(row: dict):
         try:
             return pd.Timestamp(row.get("ts"))
         except Exception:
             return pd.Timestamp.min.tz_localize("UTC")
+
     out.sort(key=_ts_key, reverse=True)
     return out[: int(limit)]
 
@@ -2206,7 +2604,10 @@ def load_ohlcv_range(
     raw = {}
     for s in symbols:
         raw[s] = ms.fetch_historical_range(
-            s, timeframe, start, end,
+            s,
+            timeframe,
+            start,
+            end,
             warmup_bars=int(warmup_bars),
             refresh=bool(refresh),
             source=str(source or "mexc"),

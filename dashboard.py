@@ -73,6 +73,7 @@ pages = [
     st.Page("views/trades.py", title="Trades", url_path="trades"),
     st.Page("views/backtest.py", title="Backtest", url_path="backtest"),
     st.Page("views/status.py", title="Status", url_path="status"),
+    st.Page("views/observability.py", title="Pulse", url_path="observability"),
     st.Page("views/health.py", title="Health", url_path="health"),
     st.Page("views/home.py", title="About", url_path="about"),
 ]
