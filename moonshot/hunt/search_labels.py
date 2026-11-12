@@ -184,10 +184,21 @@ def what_happened_label(h: dict[str, Any]) -> str:
     fc = _funnel(h)
     soft = _intish(h.get("soft_runs"))
     a = _intish(fc.get("A_keep"))
+    a_in = _intish(fc.get("A_in"))
     b = _intish(fc.get("B"))
+    n_cand = _intish(h.get("n_cand"))
     funnel = funnel_label(h)
     tested_s = f" · tried {tested}" if tested is not None else ""
 
+    # tested=0 with a candidate pool = Live-TF Stage A wipe, not "did nothing"
+    if tested is not None and int(tested) == 0:
+        pool = n_cand if n_cand is not None else a_in
+        if pool and int(pool) > 0:
+            return (
+                f"{mode} · funnel empty · 0 on Live TF "
+                f"(pool {pool}; matrix may still have run)"
+            )
+        return f"{mode} · funnel empty · checked 0 ideas"
     if soft is not None and soft == 0 and (a or 0) > 0:
         return f"{mode} · unfinished search ({funnel}){tested_s}"
     if soft is not None and soft > 0:

@@ -1278,6 +1278,51 @@ def _improve_once_impl(
     _stage_a_cands = (
         [] if skip_heavy_search else [c for c in cand_list if str(c.timeframe) == _live_tf_a]
     )
+    # Breakout/explore + denser-skip + banlist can wipe every Live-TF book
+    # (seen as "checked 0 ideas" while matrix still ran). Seed a Live-TF
+    # neighborhood from Live base so soft can still run.
+    if (not skip_heavy_search) and (not _stage_a_cands) and cand_list:
+        log.warning(
+            "stage A Live-TF empty · %s · 0/%d — seeding Live-TF denser neighborhood",
+            _live_tf_a,
+            len(cand_list),
+        )
+        _seed_a: list[Config] = []
+        for st in HUNT_STRATEGIES:
+            for lev in (5, 7, 10):
+                for adx in (14.0, 16.0, 18.0):
+                    for cd in HUNT_DENSER_COOLDOWNS:
+                        _seed_a.append(
+                            replace(
+                                base,
+                                strategy=str(st),
+                                leverage=int(lev),
+                                timeframe=str(_live_tf_a),
+                                adx_enter=float(adx),
+                                adx_exit=float(max(10.0, adx - 5)),
+                                require_squeeze=False,
+                                require_rising_adx=False,
+                                cooldown_bars=int(cd),
+                                volume_multiplier=1.1,
+                                mom_lookback=8,
+                                mom_min_atr=0.35,
+                                max_account_leverage=float(
+                                    max(lev, float(base.max_account_leverage))
+                                ),
+                                max_net_leverage=float(max(lev, float(base.max_net_leverage))),
+                            )
+                        )
+        if len(_seed_a) > int(HUNT_DENSER_MAX):
+            _seed_a = _seed_a[: int(HUNT_DENSER_MAX)]
+        _seed_a = _dedupe_cfgs_matrix(base, _seed_a)
+        _seed_a, _seed_ban = _filter_banned(_seed_a, banned)
+        funnel_counts["A_live_tf_seed"] = len(_seed_a)
+        funnel_counts["A_live_tf_seed_banned"] = int(_seed_ban)
+        _stage_a_cands = _seed_a
+        if not _stage_a_cands:
+            log.warning(
+                "stage A Live-TF seed also empty after bans — funnel stays unfinished"
+            )
     funnel_counts["A_in"] = len(_stage_a_cands)
     if skip_heavy_search:
         log.info("champion short-circuit — skipping Stage A/B/C candidate search")

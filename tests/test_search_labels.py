@@ -127,6 +127,22 @@ def test_hold_unfinished_when_soft_zero():
     assert "breakout" in msg
 
 
+def test_hold_zero_tested_with_pool_is_live_tf_empty():
+    msg = what_happened_label(
+        {
+            "improved": False,
+            "search_mode": "breakout",
+            "tested": 0,
+            "soft_runs": 0,
+            "n_cand": 50,
+            "funnel_counts": {"A_in": 0, "A_keep": 0, "B": 0},
+        }
+    )
+    assert "funnel empty" in msg
+    assert "Live TF" in msg
+    assert "checked 0 ideas" not in msg
+
+
 def test_funnel_and_coverage_labels():
     h = {
         "soft_runs": 14,
