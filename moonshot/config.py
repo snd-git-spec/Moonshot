@@ -127,6 +127,9 @@ class Config:
     fee_taker: float = (
         0.0008  # MEXC API futures taker (web/app is 0.02%; API is 0.08% since 2026-06-01)
     )
+    # Maker used by cost-stress 2× gate (fold_eval.cost_ok_for_cfg). Default = taker
+    # so API-path books stay conservative when maker is unknown.
+    fee_maker: float = 0.0008
     slippage_bps: float = 3.0
     funding_rate: float = 0.0001  # per interval; positive = longs pay shorts
     funding_interval_hours: int = 8
@@ -230,6 +233,7 @@ class Config:
             mom_min_atr=float(os.getenv("MOM_MIN_ATR", "0.5")),
             initial_stop_atr=float(os.getenv("INITIAL_STOP_ATR", "1.5")),
             fee_taker=float(os.getenv("FEE_TAKER", "0.0008")),  # MEXC API futures taker 0.08%
+            fee_maker=float(os.getenv("FEE_MAKER", os.getenv("FEE_TAKER", "0.0008"))),
             slippage_bps=float(os.getenv("SLIPPAGE_BPS", "3")),
             h4_ema_fast=int(os.getenv("H4_EMA_FAST", "20")),
             h4_ema_slow=int(os.getenv("H4_EMA_SLOW", "50")),
