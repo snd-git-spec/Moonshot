@@ -1772,7 +1772,6 @@ def live_panel() -> None:
         from moonshot.hunt.search_labels import (
             coverage_label,
             funnel_label,
-            live_holdout_label,
             nearest_miss_label,
             robust_flag_note,
             what_happened_label,
@@ -1786,7 +1785,7 @@ def live_panel() -> None:
             "Hunt activity log (not a Live scoreboard). "
             "**Funnel** = Stage A keep → B shortlist → soft-checks. "
             "**Nearest miss** = best challenger that did not promote. "
-            "**Live holdout** = deployed book week (stays flat on HOLD). "
+            "Live week lives on the tiles above. "
             "Escape = left a worse Live book without period-robust."
         )
         if held_streak >= 3:
@@ -1821,7 +1820,6 @@ def live_panel() -> None:
                     "Funnel": "running…",
                     "Coverage": "—",
                     "Nearest miss": "—",
-                    "Live holdout": "—",
                     "Gate": "—",
                 }
             )
@@ -1846,7 +1844,6 @@ def live_panel() -> None:
                     "Funnel": funnel_label(h),
                     "Coverage": coverage_label(h),
                     "Nearest miss": nearest_miss_label(h),
-                    "Live holdout": live_holdout_label(h),
                     "Gate": robust_flag_note(h),
                 }
             )
