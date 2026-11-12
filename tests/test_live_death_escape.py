@@ -14,17 +14,13 @@ def test_escape_floors_tightened():
 
 def test_green_holdout_not_death_even_if_mild_oos():
     # oos above arm floor → not death when week green
-    death, why = live_death_book(
-        week_ret=0.30, oos_ret=-0.05, soft_ret=-0.05, paper_bleeding=False
-    )
+    death, why = live_death_book(week_ret=0.30, oos_ret=-0.05, soft_ret=-0.05, paper_bleeding=False)
     assert death is False
     assert why == "live_not_death"
 
 
 def test_deep_oos_is_death():
-    death, why = live_death_book(
-        week_ret=0.30, oos_ret=-0.37, soft_ret=-0.50, paper_bleeding=False
-    )
+    death, why = live_death_book(week_ret=0.30, oos_ret=-0.37, soft_ret=-0.50, paper_bleeding=False)
     assert death is True
     assert "oos" in why
 

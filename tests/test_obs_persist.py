@@ -126,7 +126,10 @@ def test_position_excursion_and_close_anatomy():
     pos.assumed_slippage_bps = 3.0
     pos.update_excursion(99.0)  # -0.5R
     pos.update_excursion(104.0)  # +2R
-    pos.bars_held(pd_ts := __import__("pandas").Timestamp("2026-01-01 02:00", tz="UTC"), __import__("pandas").Timedelta("1h"))
+    pos.bars_held(
+        __import__("pandas").Timestamp("2026-01-01 02:00", tz="UTC"),
+        __import__("pandas").Timedelta("1h"),
+    )
     res, _ = pos.close_out(103.0, 0.02, ts, ExitReason.TRAILING)
     assert res.open_config_hash == "h1"
     assert res.mae_r == -0.5

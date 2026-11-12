@@ -20,15 +20,17 @@ def test_week_led_style_oos_red_blocked():
 
 
 def test_relative_escape_with_floors_ok():
+    # Absolute floors are escape_oos/soft_floor=-0.10; soft must clear that
+    # while still beating Live by escape_rel_*_pp.
     ok, why = _escape_window_ok(
         {"ret": 0.20},
-        -0.10,
-        -0.12,
+        -0.08,
+        -0.08,
         {"ret": 0.18},
         -0.20,
         -0.22,
     )
-    assert ok is True
+    assert ok is True, why
     assert why == "escape_windows_ok"
 
 

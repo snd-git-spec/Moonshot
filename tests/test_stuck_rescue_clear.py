@@ -22,10 +22,14 @@ def test_watchdog_clears_stuck_pending_when_env_matches_champ(tmp_path, monkeypa
     import moonshot.hunt.constants as const
     from moonshot.hunt import autopilot as ap
 
+    from moonshot.hunt.constants import _utc_now
+
+    # Fresh finish — avoid HUNT_NO_FINISH critical from stale last_improve_at.
+    now = _utc_now().isoformat()
     disk = {
         "mode": "hunt",
         "busy": False,
-        "last_improve_at": "2026-11-11T11:00:00+00:00",
+        "last_improve_at": now,
         "pending_champion_rescue": True,
         "champ_trail_streak": 3,
         "champion": {
@@ -34,7 +38,7 @@ def test_watchdog_clears_stuck_pending_when_env_matches_champ(tmp_path, monkeypa
         },
         "live_deployed": {"week_ret": 0.25},
         "history": [],
-        "hunt_event": {"kind": "hold", "ts": "2026-11-11T11:00:00+00:00"},
+        "hunt_event": {"kind": "hold", "ts": now},
     }
 
     def _load():

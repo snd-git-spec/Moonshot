@@ -9,7 +9,7 @@ import logging
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
@@ -47,8 +47,10 @@ def portfolio_lev_metrics(
         notional = qty * px
         open_notional += notional
         net_notional += sign * notional
-        margin_used += float(pos.margin()) if hasattr(pos, "margin") else notional / max(
-            1, int(getattr(pos, "leverage", 1) or 1)
+        margin_used += (
+            float(pos.margin())
+            if hasattr(pos, "margin")
+            else notional / max(1, int(getattr(pos, "leverage", 1) or 1))
         )
         try:
             liq = float(pos.liq_price(mmr))
@@ -284,11 +286,15 @@ def log_hunt_pass_experiment(
 
     path = Path(db_path) if db_path else (ROOT / "runs" / "experiments.db")
     run_id = f"hunt_pass_{generation}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
-    sealed = dict(sealed_holdout) if sealed_holdout is not None else {
-        "evaluated": False,
-        "passed": None,
-        "why": "not_provided",
-    }
+    sealed = (
+        dict(sealed_holdout)
+        if sealed_holdout is not None
+        else {
+            "evaluated": False,
+            "passed": None,
+            "why": "not_provided",
+        }
+    )
     metrics = {
         "funnel": dict(funnel),
         "kill_histogram": dict(kill_hist),

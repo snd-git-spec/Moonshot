@@ -124,7 +124,9 @@ class Config:
     partial_pct: float = 0.50
 
     # costs (VERIFY against MEXC's current futures fee schedule)
-    fee_taker: float = 0.0008  # MEXC API futures taker (web/app is 0.02%; API is 0.08% since 2026-06-01)
+    fee_taker: float = (
+        0.0008  # MEXC API futures taker (web/app is 0.02%; API is 0.08% since 2026-06-01)
+    )
     slippage_bps: float = 3.0
     funding_rate: float = 0.0001  # per interval; positive = longs pay shorts
     funding_interval_hours: int = 8

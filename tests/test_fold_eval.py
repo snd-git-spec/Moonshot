@@ -136,7 +136,9 @@ def test_should_ban_candidate_gate_fails():
     assert ok and "dsr" in why
     ok, why = _should_ban_candidate(sealed_fail=True)
     assert ok and "sealed" in why
-    ok, why = _should_ban_candidate(fold={"p25_sortino": -1.0, "ok": False, "why": "p25 -1 < floor"})
+    ok, why = _should_ban_candidate(
+        fold={"p25_sortino": -1.0, "ok": False, "why": "p25 -1 < floor"}
+    )
     assert ok and "fold" in why
 
 

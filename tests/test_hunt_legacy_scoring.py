@@ -8,15 +8,15 @@ from moonshot.hunt.scoring import _rank_key
 
 
 def _br(**kw):
-    defaults = dict(
-        total_return=0.1,
-        win_rate=0.5,
-        expectancy_r=0.1,
-        trades=20,
-        max_drawdown=0.1,
-        final_equity=110.0,
-        halted="",
-    )
+    defaults = {
+        "total_return": 0.1,
+        "win_rate": 0.5,
+        "expectancy_r": 0.1,
+        "trades": 20,
+        "max_drawdown": 0.1,
+        "final_equity": 110.0,
+        "halted": "",
+    }
     defaults.update(kw)
     return SimpleNamespace(**defaults)
 

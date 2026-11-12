@@ -10,7 +10,7 @@ DSR is v1 multiple-testing (PBO/CSCV still TODO in dsr.py).
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -76,10 +76,7 @@ def sealed_holdout_days() -> int:
 def selection_end_for_sealed(data_end: pd.Timestamp) -> pd.Timestamp:
     """Last timestamp search may use — sealed bars start after this."""
     end = pd.Timestamp(data_end)
-    if end.tzinfo is None:
-        end = end.tz_localize("UTC")
-    else:
-        end = end.tz_convert("UTC")
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
     return end - pd.Timedelta(days=int(sealed_holdout_days()))
 
 
@@ -90,10 +87,7 @@ def assert_selection_before_sealed(
     """Fail closed if selection window eats into sealed bars."""
     sealed_start = selection_end_for_sealed(data_end)
     sel = pd.Timestamp(selection_end)
-    if sel.tzinfo is None:
-        sel = sel.tz_localize("UTC")
-    else:
-        sel = sel.tz_convert("UTC")
+    sel = sel.tz_localize("UTC") if sel.tzinfo is None else sel.tz_convert("UTC")
     # Allow equality: selection ends at sealed_start (sealed is (sealed_start, data_end]).
     if sel > sealed_start + pd.Timedelta(seconds=1):
         raise RuntimeError(

@@ -116,9 +116,7 @@ class Persistence:
             "CREATE INDEX IF NOT EXISTS idx_trades_open_config_hash ON trades(open_config_hash)"
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts)")
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cycle_snapshot_ts ON cycle_snapshot(ts)"
-        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_cycle_snapshot_ts ON cycle_snapshot(ts)")
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_expectancy_rollup_ts ON expectancy_rollup(ts)"
         )
@@ -522,9 +520,7 @@ class Persistence:
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
         return df
 
-    def load_cycle_snapshots(
-        self, mode: Optional[str] = None, limit: int = 500
-    ) -> pd.DataFrame:
+    def load_cycle_snapshots(self, mode: Optional[str] = None, limit: int = 500) -> pd.DataFrame:
         q = """SELECT ts, mode, equity, peak, drawdown, effective_lev, net_lev,
                       open_symbols, pause_until, halt_reason, kill, config_hash,
                       feed_age_s, cycle_id FROM cycle_snapshot"""
@@ -542,9 +538,7 @@ class Persistence:
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
         return df
 
-    def load_expectancy_rollups(
-        self, mode: Optional[str] = None, limit: int = 50
-    ) -> pd.DataFrame:
+    def load_expectancy_rollups(self, mode: Optional[str] = None, limit: int = 50) -> pd.DataFrame:
         q = """SELECT ts, mode, config_hash, n, mean_r, ci_low, ci_high, cost_share,
                       max_dd, liquidations, label FROM expectancy_rollup"""
         args: list[Any] = []

@@ -139,10 +139,7 @@ def bucket_trades_by_hash(rows: Iterable[dict[str, Any]]) -> list[BucketStats]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         ch = row.get("config_hash")
-        if ch is None or ch == "":
-            key = "LEGACY"
-        else:
-            key = str(ch)
+        key = "LEGACY" if ch is None or ch == "" else str(ch)
         groups.setdefault(key, []).append(row)
     out: list[BucketStats] = []
     for key, items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))):
@@ -285,9 +282,7 @@ def render_report(
     ]
     if pinned_hash:
         lines.append(f"Pinned config_hash: `{pinned_hash}`")
-        lines.append(
-            f"Excluded non-pinned closes (old books / other TF): **{int(n_excluded)}**"
-        )
+        lines.append(f"Excluded non-pinned closes (old books / other TF): **{int(n_excluded)}**")
         lines.append("")
     if by_hash is not None:
         title = (

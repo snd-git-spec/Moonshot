@@ -90,10 +90,7 @@ class PaperBroker(BaseBroker):
         assumed_bps = float(self.cfg.slippage_bps)
         px = price * (1 + self.cfg.slip if buy else 1 - self.cfg.slip)
         # Realized vs ref: buy positive = paid up; sell positive = received less.
-        if price > 0:
-            slip_bps = ((px - price) / price) * 10_000.0 * (1.0 if buy else -1.0)
-        else:
-            slip_bps = 0.0
+        slip_bps = (px - price) / price * 10000.0 * (1.0 if buy else -1.0) if price > 0 else 0.0
         fee = px * qty * self.cfg.fee_taker
         delta = qty if buy else -qty
         s0 = self.signed.get(symbol, 0.0)

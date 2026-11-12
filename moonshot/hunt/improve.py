@@ -143,7 +143,6 @@ from moonshot.hunt.scoring import (
     _recent_eval,
     _matrix_tfs_for_pass,
     _select_polish_base,
-    _should_ban_week,
     _should_ban_candidate,
     _tf_lev_matrix_cfgs,
     _week_eval,
@@ -481,7 +480,9 @@ def _improve_once_impl(
         best_cost_ok, _, _ = cost_ok_for_cfg(base_data, base, end=week_end)
     except Exception:
         best_cost_ok = True
-    best_roi = float(best_fold.get("roi") if best_fold.get("roi") is not None else base_o.total_return)
+    best_roi = float(
+        best_fold.get("roi") if best_fold.get("roi") is not None else base_o.total_return
+    )
     (not wf_enabled) or bool(base_wf and base_wf.get("ok"))
     promote_reason = "baseline"
     silence_rotate = False
@@ -515,7 +516,11 @@ def _improve_once_impl(
         cdata = _prepare_cached(c_raw, cand_cfg, feat_cache)
         crecent = _recent_eval(cdata, cand_cfg, end=week_end)
         cweek = _dual_week_eval(cdata, cand_cfg, end=week_end)
-        cfold = fold if isinstance(fold, dict) else eval_cfg_folds(cdata, cand_cfg, end=week_end, smoke=False)
+        cfold = (
+            fold
+            if isinstance(fold, dict)
+            else eval_cfg_folds(cdata, cand_cfg, end=week_end, smoke=False)
+        )
         if cost_ok is None:
             try:
                 c_cost_ok, _, _ = cost_ok_for_cfg(cdata, cand_cfg, end=week_end)
@@ -820,7 +825,10 @@ def _improve_once_impl(
                     "— champion rescue armed",
                     config_hash=_bch[:8],
                 )
-            elif state.get("pending_champion_rescue") and state.get("paper_retire_source") == "paper_retire":
+            elif (
+                state.get("pending_champion_rescue")
+                and state.get("paper_retire_source") == "paper_retire"
+            ):
                 grace = int(state.get("paper_retire_grace_passes") or 0) + 1
                 state["paper_retire_grace_passes"] = grace
                 if grace >= int(HUNT_RETIRE_GRACE_PASSES) and not state.get(
@@ -1136,9 +1144,7 @@ def _improve_once_impl(
             log.warning("best_by_tf seed failed: %s", e)
     if matrix_winner_cfg is not None:
         matrix_winner_cfg = replace(matrix_winner_cfg, starting_equity=research_eq)
-    island_polish = _best_island_elite_cfg(
-        state, base=best_cfg, knobs_to_cfg=_knobs_to_cfg
-    )
+    island_polish = _best_island_elite_cfg(state, base=best_cfg, knobs_to_cfg=_knobs_to_cfg)
     polish_base = _select_polish_base(
         live_base=best_cfg,
         matrix_winner_cfg=matrix_winner_cfg,
@@ -1191,16 +1197,10 @@ def _improve_once_impl(
             recover_reason or "force_skip_denser",
         )
     elif (not skip_heavy_search) and (
-        hunt_exhausted
-        or held >= int(HUNT_STUCK_HELD)
-        or search_mode in ("explore", "breakout")
+        hunt_exhausted or held >= int(HUNT_STUCK_HELD) or search_mode in ("explore", "breakout")
     ):
-        _denser_tfs = (
-            list(HUNT_MATRIX_TFS) if hunt_exhausted else [str(polish_base.timeframe)]
-        )
-        _denser_cap = (
-            int(HUNT_EXHAUSTED_DENSER_MAX) if hunt_exhausted else int(HUNT_DENSER_MAX)
-        )
+        _denser_tfs = list(HUNT_MATRIX_TFS) if hunt_exhausted else [str(polish_base.timeframe)]
+        _denser_cap = int(HUNT_EXHAUSTED_DENSER_MAX) if hunt_exhausted else int(HUNT_DENSER_MAX)
         for _dtf in _denser_tfs:
             for st in HUNT_STRATEGIES:
                 for lev in (5, 7, 10):
@@ -1394,9 +1394,7 @@ def _improve_once_impl(
         except Exception as e:
             log.warning("stage B failed: %s", e)
             continue
-        do_ban, why_ban = _should_ban_candidate(
-            week=cweek_s, fold=fold_b, cost_ok=cost_ok_b
-        )
+        do_ban, why_ban = _should_ban_candidate(week=cweek_s, fold=fold_b, cost_ok=cost_ok_b)
         if do_ban:
             _banlist_add(
                 state, cand, week_ret=float(cweek_s.get("ret") or 0), reason=f"B:{why_ban}"
@@ -1999,9 +1997,7 @@ def _improve_once_impl(
                 best_week = cweek
                 best_fold = dict(fold_r) if isinstance(fold_r, dict) else best_fold
                 best_cost_ok = bool(cost_ok_r)
-                best_roi = float(
-                    (fold_r or {}).get("roi") if isinstance(fold_r, dict) else cret
-                )
+                best_roi = float((fold_r or {}).get("roi") if isinstance(fold_r, dict) else cret)
                 best_recent = _recent_eval(
                     _prepare_cached(_raw_for_tf(str(cand.timeframe)) or raw, cand, feat_cache),
                     cand,
@@ -2238,7 +2234,9 @@ def _improve_once_impl(
                 and (silence_rotate or paper_bleeding or stuck_soften or champion_rescue)
             )
             esc_ok = False
-            esc_why_local = "escape_not_armed" if live_is_death else f"live_not_death:{live_death_why}"
+            esc_why_local = (
+                "escape_not_armed" if live_is_death else f"live_not_death:{live_death_why}"
+            )
             if escape_armed:
                 esc_ok, esc_why_local = _escape_window_ok(
                     best_week,
@@ -2339,14 +2337,10 @@ def _improve_once_impl(
 
                     _trial_hashes = []
                     for _c in list(cand_list)[: max(1, int(tested) or 1)]:
-                        try:
+                        with contextlib.suppress(Exception):
                             _trial_hashes.append(_dsr_hash(_c))
-                        except Exception:
-                            pass
-                    try:
+                    with contextlib.suppress(Exception):
                         _trial_hashes.append(_dsr_hash(best_cfg))
-                    except Exception:
-                        pass
                     n_pass, n_cum = record_pass_trials(
                         _trial_hashes,
                         run_id=f"hunt_{generation}",
@@ -2646,9 +2640,7 @@ def _improve_once_impl(
                 or held >= int(HUNT_STUCK_SOFTEN_HELD)
             )
             if escape_xfer and live_is_death:
-                log.warning(
-                    "transfer check failed during death escape (%s) — still promoting", e
-                )
+                log.warning("transfer check failed during death escape (%s) — still promoting", e)
                 transfer_gap = {
                     "research_source": str(hunt_src),
                     "research_ret": spot_ret,
@@ -2893,9 +2885,7 @@ def _improve_once_impl(
             prior_ret=(best_week or {}).get("prior_ret") if not improved else None,
             oos_ret=float(best_o.total_return) if not improved else None,
             soft_ret=(
-                float(best_soft.total_return)
-                if (not improved and best_soft is not None)
-                else None
+                float(best_soft.total_return) if (not improved and best_soft is not None) else None
             ),
             why=str(material_why or escape_why or "") if not improved else "",
             search_mode=str(search_mode),
@@ -2980,9 +2970,7 @@ def _improve_once_impl(
     week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
     week_gap = max(0.0, week_tgt - float(best_week.get("ret") or 0))
     if improved and hunt_legacy_scoring():
-        log.warning(
-            "HUNT_LEGACY_SCORING=1: promote blocked — comparison flag never deploys"
-        )
+        log.warning("HUNT_LEGACY_SCORING=1: promote blocked — comparison flag never deploys")
         decision["promote_suppressed"] = True
         decision["improved"] = False
         decision["promote_tier"] = "hold"

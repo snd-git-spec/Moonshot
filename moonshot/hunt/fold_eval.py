@@ -27,10 +27,7 @@ from moonshot.hunt.fold_runner import (
 def _bar_index(data: dict, end: pd.Timestamp) -> pd.DatetimeIndex:
     """Sorted unique bar timestamps across symbols, clipped to ``end``."""
     end = pd.Timestamp(end)
-    if end.tzinfo is None:
-        end = end.tz_localize("UTC")
-    else:
-        end = end.tz_convert("UTC")
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
     stamps: list[pd.Timestamp] = []
     for sd in data.values():
         bars = getattr(sd, "bars", None)
@@ -38,10 +35,7 @@ def _bar_index(data: dict, end: pd.Timestamp) -> pd.DatetimeIndex:
             continue
         for b in bars:
             ts = pd.Timestamp(b.Index)
-            if ts.tzinfo is None:
-                ts = ts.tz_localize("UTC")
-            else:
-                ts = ts.tz_convert("UTC")
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
             if ts <= end:
                 stamps.append(ts)
     if not stamps:
@@ -77,16 +71,11 @@ def eval_cfg_folds(
                 "trades": 0,
             }
     end = pd.Timestamp(end)
-    if end.tzinfo is None:
-        end = end.tz_localize("UTC")
-    else:
-        end = end.tz_convert("UTC")
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
 
     folds_n = int(n_folds) if n_folds is not None else (2 if smoke else int(N_FOLDS))
     days = int(
-        calendar_days
-        if calendar_days is not None
-        else (int(HUNT_HALVING_A_DAYS) if smoke else 0)
+        calendar_days if calendar_days is not None else (int(HUNT_HALVING_A_DAYS) if smoke else 0)
     )
     idx = _bar_index(data, end)
     if days > 0 and len(idx) > 0:
@@ -227,9 +216,7 @@ def cost_ok_for_cfg(
 
     m1 = _ret(1.0)
     m2 = _ret(2.0)
-    gate = cost_stress_gate(
-        m1 if math.isfinite(m1) else -1.0, m2 if math.isfinite(m2) else -1.0
-    )
+    gate = cost_stress_gate(m1 if math.isfinite(m1) else -1.0, m2 if math.isfinite(m2) else -1.0)
     return (
         bool(gate.eligible),
         float(m1) if math.isfinite(m1) else -1.0,

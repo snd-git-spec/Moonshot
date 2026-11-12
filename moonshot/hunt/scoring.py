@@ -642,10 +642,8 @@ def _raise_champion_peak(
     if pr is None and isinstance(week, dict):
         pr = week.get("prior_ret")
     if pr is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             blob["prior_ret"] = float(pr)
-        except (TypeError, ValueError):
-            pass
     _sync_champion_peak(state, blob)
     return blob
 
@@ -1570,8 +1568,7 @@ def _raise_elite_archive(
         "roi": float(roi) if roi is not None else None,
         "cost_ok": bool(cost_ok) if cost_ok is not None else True,
         "week_ret": float(week_ret) if week_ret is not None else None,
-        "fingerprint": fingerprint
-        or f"{strat}|{tf}|{int(knobs.get('leverage') or 0)}",
+        "fingerprint": fingerprint or f"{strat}|{tf}|{int(knobs.get('leverage') or 0)}",
         "island": _island_key(strat, tf),
         "primary_metric": "p25_fold_sortino",
     }
