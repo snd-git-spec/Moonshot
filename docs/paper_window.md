@@ -1,68 +1,50 @@
-# Paper measurement window (Phase 0)
+# Paper measurement window
 
-## Freeze rationale
+## Fresh start (2026-11-12)
 
-Escape promoted `momentum_15` / `1h` / `5x` off a death `10x@5m` book.
-`AUTOPILOT_FROZEN=1` keeps paper on that identity so expectancy can be scored
-honestly without mid-window hunt thrash rewriting `.env` / restarting paper.
+Full reset at `2026-11-12T12:46:36+00:00`:
 
-Research/hunt may still run; promote apply and paper restart from hunt are suppressed.
+- Paper ledger wiped (trades / positions / equity / risk / events)
+- Hunt memory wiped (history, banlist, champion, elite archive, islands)
+- `STARTING_EQUITY=1000.0`
+- `AUTOPILOT_FROZEN=0` — hunt may promote / restart paper again
+- `LIVE_TRADING_ENABLED=0` (practice only)
 
-## Pinned book
+Backup on droplet: `/opt/moonshot/backups/full_reset_20261112T124631Z`
+
+## Live seed book (starting identity)
 
 - Strategy: `momentum_15`
 - Timeframe: `1h`
 - Leverage: `5`
-- `LIVE_TRADING_ENABLED=0` (practice only)
-- Pinned `config_hash` (from live `.env` book): `3f689065ab7153af`
 
-Every paper close must carry `config_hash` (already wired in live/paper path).
+Hunt may replace this when a candidate passes gates.
 
 ## paper_window_start_ts
 
-`2026-11-12T10:50:00+00:00` — Phase 0 freeze for post-escape `5x@1h` measurement.
+`2026-11-12T12:46:36+00:00` — post full-reset measurement.
 
-## Decision identity (pinned hash only)
+## Decision identity (pinned hash only while scoring a fixed book)
 
-Phase 0 KEEP / STOP / EXTEND is scored **only** on closes whose `config_hash`
-equals the pinned book hash above. Old `5m` / other-leverage / LEGACY rows are
-**excluded** from the decision table (they must not pollute EXTEND / mean R).
+KEEP / STOP / EXTEND for a fixed book uses closes whose `config_hash` equals
+that book’s hash. After a promote, re-resolve the hash from `.env`.
 
-`scripts/paper_expectancy.py` and autopilot refresh default to `pinned_only=True`.
-
-## Legacy / pre-window trades
-
-Rows with `config_hash IS NULL` are the **legacy** bucket — excluded.
-Closes under other hashes (e.g. prior `10x@5m`) are excluded from this window’s
-decision (not merely listed as separate buckets).
+`scripts/paper_expectancy.py` defaults to `pinned_only=True` (current `.env` hash).
 
 ## Time cap
 
 - Primary: **8 weeks** from `paper_window_start_ts`
 - If `n < 100` at the cap → **EXTEND** 4 weeks; no tuning
 
-## LOCKED acceptance criteria (written before looking)
-
-Decision rule (pinned hash only):
+## LOCKED acceptance criteria
 
 1. **KEEP-VALIDATED:** `n >= 100` AND bootstrap 95% CI on `mean(r_multiple)` excludes 0 and is positive
 2. **STOP:** `n >= 100` AND (`mean(r_multiple) <= 0` OR CI includes 0)
-   - If `cost_share > 40%` → execution problem → fix fills/costs first
-   - If `cost_share <= 40%` → retire this hash; do not polish it; restart research under fold-primary gates only
-3. **EXTEND:** `n < 100` → keep measuring; no tuning of this book
-   - At the **8-week** time cap with `n < 100` → EXTEND +4 weeks (still no tuning)
+   - If `cost_share > 40%` → execution problem first
+   - Else retire hash; do not polish a dead book
+3. **EXTEND:** `n < 100` → keep measuring
 
-## LOCKED units note
+## LOCKED units
 
 - `r_multiple` is already **net** of fees and funding
-- `cost_share` is dollar costs / gross dollar PnL (see `moonshot/paper_expectancy.py`)
-
-## Ops vs research
-
-- Escape / silence / bleed: while frozen, **no apply**
-- When freeze lifts: escape may deploy with `research_promote=false`; **never** raise `champion_peak`
-
-## Freeze status
-
-- Set: `2026-11-12` — Phase 0 measure window
-- End: only by explicit human env flip of `AUTOPILOT_FROZEN=0`
+- `cost_share` is dollar costs / gross dollar PnL
