@@ -1320,9 +1320,7 @@ def _improve_once_impl(
         funnel_counts["A_live_tf_seed_banned"] = int(_seed_ban)
         _stage_a_cands = _seed_a
         if not _stage_a_cands:
-            log.warning(
-                "stage A Live-TF seed also empty after bans — funnel stays unfinished"
-            )
+            log.warning("stage A Live-TF seed also empty after bans — funnel stays unfinished")
     funnel_counts["A_in"] = len(_stage_a_cands)
     if skip_heavy_search:
         log.info("champion short-circuit — skipping Stage A/B/C candidate search")

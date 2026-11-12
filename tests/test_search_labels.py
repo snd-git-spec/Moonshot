@@ -158,9 +158,7 @@ def test_funnel_and_coverage_labels():
     }
     assert funnel_label(h) == "A16→B14→soft14"
     assert "3 strat" in coverage_label(h)
-    assert "unfinished" in funnel_label(
-        {"soft_runs": 0, "funnel_counts": {"A_keep": 16, "B": 0}}
-    )
+    assert "unfinished" in funnel_label({"soft_runs": 0, "funnel_counts": {"A_keep": 16, "B": 0}})
 
 
 def test_nearest_miss_and_live_holdout():

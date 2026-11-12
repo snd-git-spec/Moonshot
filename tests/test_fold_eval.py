@@ -176,6 +176,7 @@ def test_cost_ok_for_cfg_nonfinite_returns_nan(monkeypatch):
 
     monkeypatch.setattr(fe, "BacktestEngine", _Boom)
     cfg = Config(strategy="momentum_15", timeframe="1h", leverage=5)
+
     # Minimal SymbolData-shaped stub: only bars[-1].Index is read for end.
     class _Bar:
         Index = pd.Timestamp("2026-11-01", tz="UTC")
