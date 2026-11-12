@@ -31,6 +31,7 @@ from moonshot.live import (
 from moonshot.hunt.constants import (
     HUNT_CHAMP_TRAIL_PP,
     HUNT_TARGETS,
+    PAPER_EXPECTANCY_EVERY_SEC,
     _env_book_fingerprint,
     _load_autopilot_state,
     _pct_of_risk_msg,
@@ -57,6 +58,37 @@ from moonshot.paths import (
 # How often the champ/.env/apply watchdog re-checks (seconds).
 SCOREBOARD_WATCHDOG_SEC = 180
 PAPER_BOOK_ASSERT_SEC = 45
+
+
+def _maybe_run_paper_expectancy(st: dict) -> None:
+    """Phase 0: refresh paper expectancy rollup on a fixed cadence."""
+    import contextlib
+
+    import pandas as pd
+
+    try:
+        last = st.get("paper_expectancy_at")
+        if last:
+            age = (_utc_now() - pd.Timestamp(last)).total_seconds()
+            if age < float(PAPER_EXPECTANCY_EVERY_SEC):
+                return
+    except Exception:
+        pass
+    try:
+        from moonshot.obs import write_expectancy_rollups
+        from moonshot.paper_expectancy import write_expectancy_report
+        from moonshot.paths import DB_PATH, ROOT
+        from moonshot.persist import Persistence
+
+        path = write_expectancy_report(str(DB_PATH), ROOT / "runs")
+        with contextlib.suppress(Exception):
+            write_expectancy_rollups(Persistence(str(DB_PATH), mode="paper"), force=True)
+        st["paper_expectancy_at"] = _utc_now().isoformat()
+        st["paper_expectancy_path"] = str(path)
+        log.info("paper expectancy refreshed · %s", path.name)
+        _live_feed("paper_expectancy", f"refreshed {path.name}")
+    except Exception as e:
+        log.warning("paper expectancy refresh failed: %s", e)
 
 
 def _run_scoreboard_watchdog() -> dict:
@@ -195,6 +227,10 @@ def _run_scoreboard_watchdog() -> dict:
     want_pending = st.get("pending_champion_rescue")
     want_trail = st.get("champ_trail_streak")
 
+    _maybe_run_paper_expectancy(st)
+    want_exp_at = st.get("paper_expectancy_at")
+    want_exp_path = st.get("paper_expectancy_path")
+
     def _patch(latest: dict) -> None:
         latest["scoreboard_watchdog"] = wd
         # Never keep legacy TF-slim flag.
@@ -207,6 +243,10 @@ def _run_scoreboard_watchdog() -> dict:
             latest["force_skip_denser"] = True
             if want_reason:
                 latest["hunt_recover_reason"] = want_reason
+        if want_exp_at:
+            latest["paper_expectancy_at"] = want_exp_at
+        if want_exp_path:
+            latest["paper_expectancy_path"] = want_exp_path
 
     latest = _update_autopilot_state(_patch)
     return latest.get("scoreboard_watchdog") or wd

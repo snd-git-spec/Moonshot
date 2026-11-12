@@ -206,6 +206,11 @@ HUNT_HALVING_A_KEEP = 16  # thinner Stage A→B keep (was 24; stuck fat was chur
 HUNT_HALVING_B_KEEP = 12
 # When stuck: raise soft_budget to at least this (was 20 — fat funnel diluted escapes).
 HUNT_STUCK_SOFT_BUDGET = 14
+# Phase 2: research memory — top-N fold-ranked elites (not Live deploy).
+HUNT_ELITE_ARCHIVE_N = 12
+HUNT_ELITE_ISLAND_TOP = 3  # keep top K per island (strategy|tf)
+# Phase 0: how often autopilot rewrites paper expectancy report (seconds).
+PAPER_EXPECTANCY_EVERY_SEC = 6 * 3600
 HUNT_CURRICULUM_SYMBOLS = ("BTC/USDT:USDT", "ETH/USDT:USDT")
 HUNT_BANLIST_CAP = 5000
 HUNT_BAN_WEEK_FLOOR = -0.20  # week_ret below this → ban

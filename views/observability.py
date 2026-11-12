@@ -520,7 +520,15 @@ else:
     cost_pass = int(latest_hunt.get("cost_pass") or 0)
     promoted = int(latest_hunt.get("promote") or 0)
     primary = str(latest_hunt.get("primary_metric") or "p25_fold_sortino")
-    st.caption(f"Hunt primary metric: `{primary}` · week = Live goal diagnostic only")
+    n_s = latest_hunt.get("n_unique_strat")
+    n_t = latest_hunt.get("n_unique_tf")
+    n_l = latest_hunt.get("n_unique_lev")
+    cov = ""
+    if n_s is not None or n_t is not None or n_l is not None:
+        cov = f" · unique S/T/L={n_s}/{n_t}/{n_l}"
+    st.caption(
+        f"Hunt primary metric: `{primary}` · week = Live goal diagnostic only{cov}"
+    )
     h1, h2, h3, h4, h5, h6 = st.columns(6)
     h1.metric("Ideas screened", f"{tried}")
     h2.metric("Survived A", f"{kept}")

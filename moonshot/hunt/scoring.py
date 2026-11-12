@@ -26,6 +26,8 @@ from moonshot.hunt.constants import (
     HUNT_BANLIST_CAP,
     HUNT_BAN_WEEK_FLOOR,
     HUNT_BREAKOUT_N,
+    HUNT_ELITE_ARCHIVE_N,
+    HUNT_ELITE_ISLAND_TOP,
     HUNT_EXPLORE_N,
     HUNT_LEV15_MIN_SOFT_TRADES,
     HUNT_LEV15_MIN_WEEK_TRADES,
@@ -1501,16 +1503,150 @@ def _best_by_tf_seed_ok(
     return bool(ok)
 
 
+def _island_key(strategy: str, timeframe: str) -> str:
+    return f"{str(strategy or '').strip().lower()}|{str(timeframe or '').strip().lower()}"
+
+
+def _elite_rank_tuple(blob: dict) -> tuple:
+    """Fold-primary archive rank: p25 → cost_ok → roi (week trailing)."""
+    import math
+
+    try:
+        p25 = float(blob.get("p25_sortino"))
+    except (TypeError, ValueError):
+        p25 = float("nan")
+    if not math.isfinite(p25):
+        p25 = -999.0
+    cost_i = 1 if blob.get("cost_ok", True) else 0
+    try:
+        roi = float(blob.get("roi"))
+    except (TypeError, ValueError):
+        roi = float("nan")
+    if not math.isfinite(roi):
+        try:
+            roi = float(blob.get("week_ret") or -999)
+        except (TypeError, ValueError):
+            roi = -999.0
+    try:
+        week = float(blob.get("week_ret") or -999)
+    except (TypeError, ValueError):
+        week = -999.0
+    return (p25, cost_i, roi, week)
+
+
+def _raise_elite_archive(
+    state: dict,
+    *,
+    knobs: dict,
+    p25_sortino: float | None,
+    roi: float | None,
+    cost_ok: bool | None,
+    week_ret: float | None,
+    generation: int,
+    ts: str,
+    fingerprint: str | None = None,
+) -> None:
+    """Raise-only research memory: top-N by fold rank + per-island top-K."""
+    if not isinstance(knobs, dict) or not knobs.get("strategy"):
+        return
+    try:
+        p25 = float(p25_sortino) if p25_sortino is not None else float("nan")
+    except (TypeError, ValueError):
+        p25 = float("nan")
+    import math
+
+    if not math.isfinite(p25):
+        return  # require fold score for archive entry
+    strat = str(knobs.get("strategy") or "").strip().lower()
+    tf = str(knobs.get("timeframe") or "").strip().lower()
+    blob = {
+        "ts": ts,
+        "generation": int(generation),
+        "knobs": dict(knobs),
+        "strategy": strat,
+        "timeframe": tf,
+        "leverage": int(knobs.get("leverage") or 0),
+        "p25_sortino": p25,
+        "roi": float(roi) if roi is not None else None,
+        "cost_ok": bool(cost_ok) if cost_ok is not None else True,
+        "week_ret": float(week_ret) if week_ret is not None else None,
+        "fingerprint": fingerprint
+        or f"{strat}|{tf}|{int(knobs.get('leverage') or 0)}",
+        "island": _island_key(strat, tf),
+        "primary_metric": "p25_fold_sortino",
+    }
+    archive = list(state.get("elite_archive") or [])
+    # Replace same fingerprint if new rank wins; else append.
+    fp = str(blob["fingerprint"])
+    replaced = False
+    for i, prev in enumerate(archive):
+        if str((prev or {}).get("fingerprint") or "") == fp:
+            if _elite_rank_tuple(blob) > _elite_rank_tuple(prev or {}):
+                archive[i] = blob
+            replaced = True
+            break
+    if not replaced:
+        archive.append(blob)
+    archive.sort(key=_elite_rank_tuple, reverse=True)
+    state["elite_archive"] = archive[: int(HUNT_ELITE_ARCHIVE_N)]
+
+    # Islands: top-K per strategy|tf
+    islands: dict = state.get("islands") if isinstance(state.get("islands"), dict) else {}
+    ik = blob["island"]
+    isle = list(islands.get(ik) or [])
+    isle = [x for x in isle if str((x or {}).get("fingerprint") or "") != fp]
+    isle.append(blob)
+    isle.sort(key=_elite_rank_tuple, reverse=True)
+    islands[ik] = isle[: int(HUNT_ELITE_ISLAND_TOP)]
+    state["islands"] = islands
+
+
+def _best_island_elite_cfg(
+    state: dict,
+    *,
+    base: Config,
+    knobs_to_cfg,
+) -> Config | None:
+    """Pick highest fold-ranked island elite different from Live fingerprint."""
+    archive = list(state.get("elite_archive") or [])
+    if not archive:
+        # Flatten islands if archive empty
+        islands = state.get("islands") if isinstance(state.get("islands"), dict) else {}
+        for rows in islands.values():
+            archive.extend(list(rows or []))
+        archive.sort(key=_elite_rank_tuple, reverse=True)
+    live_fp = (
+        f"{str(base.strategy).strip().lower()}|"
+        f"{str(base.timeframe).strip().lower()}|"
+        f"{int(base.leverage)}"
+    )
+    for blob in archive:
+        kn = (blob or {}).get("knobs")
+        if not isinstance(kn, dict):
+            continue
+        fp = str((blob or {}).get("fingerprint") or "")
+        if fp == live_fp:
+            continue
+        try:
+            return knobs_to_cfg(kn)
+        except Exception:
+            continue
+    return None
+
+
 def _select_polish_base(
     *,
     live_base: Config,
     matrix_winner_cfg: Config | None,
     best_by_tf_cfg: Config | None,
     champion_cfg: Config | None,
+    island_elite_cfg: Config | None = None,
 ) -> Config:
-    """Precedence: robust matrix winner > best_by_tf > champion > Live."""
+    """Precedence: robust matrix winner > island elite > best_by_tf > champion > Live."""
     if matrix_winner_cfg is not None:
         return matrix_winner_cfg
+    if island_elite_cfg is not None:
+        return island_elite_cfg
     if best_by_tf_cfg is not None:
         return best_by_tf_cfg
     if champion_cfg is not None:

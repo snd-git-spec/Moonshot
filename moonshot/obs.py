@@ -146,6 +146,48 @@ def kill_histogram(
     return hist
 
 
+def coverage_unique_counts(
+    cfgs: Sequence[Any] | None = None,
+    *,
+    matrix_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, int]:
+    """Count unique strategy / timeframe / leverage seen this pass."""
+    strats: set[str] = set()
+    tfs: set[str] = set()
+    levs: set[int] = set()
+    n = 0
+    for c in cfgs or []:
+        try:
+            strats.add(str(getattr(c, "strategy", "") or "").strip().lower())
+            tfs.add(str(getattr(c, "timeframe", "") or "").strip().lower())
+            levs.add(int(getattr(c, "leverage", 0) or 0))
+            n += 1
+        except Exception:
+            continue
+    for r in matrix_rows or []:
+        if r.get("skip"):
+            continue
+        try:
+            if r.get("strategy"):
+                strats.add(str(r.get("strategy") or "").strip().lower())
+            if r.get("tf") or r.get("timeframe"):
+                tfs.add(str(r.get("tf") or r.get("timeframe") or "").strip().lower())
+            if r.get("leverage") is not None:
+                levs.add(int(r.get("leverage") or 0))
+            n += 1
+        except Exception:
+            continue
+    strats.discard("")
+    tfs.discard("")
+    levs.discard(0)
+    return {
+        "n_cand": int(n),
+        "n_unique_strat": len(strats),
+        "n_unique_tf": len(tfs),
+        "n_unique_lev": len(levs),
+    }
+
+
 def hunt_funnel_metrics(
     *,
     scout_in: int,
@@ -161,6 +203,10 @@ def hunt_funnel_metrics(
     fold_pass: int | None = None,
     promote_attempt: int | None = None,
     primary_metric: str = "p25_fold_sortino",
+    n_unique_strat: int | None = None,
+    n_unique_tf: int | None = None,
+    n_unique_lev: int | None = None,
+    n_cand: int | None = None,
 ) -> dict[str, Any]:
     scored = 0
     for r in matrix_rows or []:
@@ -185,6 +231,14 @@ def hunt_funnel_metrics(
         out["fold_pass"] = int(fold_pass)
     if promote_attempt is not None:
         out["promote_attempt"] = int(promote_attempt)
+    if n_unique_strat is not None:
+        out["n_unique_strat"] = int(n_unique_strat)
+    if n_unique_tf is not None:
+        out["n_unique_tf"] = int(n_unique_tf)
+    if n_unique_lev is not None:
+        out["n_unique_lev"] = int(n_unique_lev)
+    if n_cand is not None:
+        out["n_cand"] = int(n_cand)
     return out
 
 

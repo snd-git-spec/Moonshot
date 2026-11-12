@@ -104,6 +104,8 @@ from moonshot.hunt.scoring import (
     _cfg_fingerprint,
     _density_polish_cfgs,
     _raise_champion_peak,
+    _raise_elite_archive,
+    _best_island_elite_cfg,
     _resolve_champion_peak,
     _sync_champion_peak,
     _dedupe_cfgs_matrix,
@@ -1132,11 +1134,15 @@ def _improve_once_impl(
             log.warning("best_by_tf seed failed: %s", e)
     if matrix_winner_cfg is not None:
         matrix_winner_cfg = replace(matrix_winner_cfg, starting_equity=research_eq)
+    island_polish = _best_island_elite_cfg(
+        state, base=best_cfg, knobs_to_cfg=_knobs_to_cfg
+    )
     polish_base = _select_polish_base(
         live_base=best_cfg,
         matrix_winner_cfg=matrix_winner_cfg,
         best_by_tf_cfg=by_tf_polish,
         champion_cfg=champ_polish,
+        island_elite_cfg=island_polish,
     )
 
     tested = 0
@@ -3335,6 +3341,26 @@ def _improve_once_impl(
     elif champion:
         # Escape / silence / hold — never raise champion_peak on escape tiers.
         _sync_champion_peak(state, champion)
+    # Phase 2: research elite archive (fold-primary) — escape may update archive
+    # when folds exist, but never raises champion_peak above.
+    with contextlib.suppress(Exception):
+        try:
+            _p25_arch = float((best_fold or {}).get("p25_sortino"))
+        except (TypeError, ValueError):
+            _p25_arch = float("nan")
+        if _p25_arch == _p25_arch:
+            _fp = _cfg_fingerprint(best_cfg)
+            _raise_elite_archive(
+                state,
+                knobs=knobs,
+                p25_sortino=_p25_arch,
+                roi=float(best_roi) if best_roi is not None else None,
+                cost_ok=bool(best_cost_ok),
+                week_ret=float(best_week.get("ret") or 0),
+                generation=int(generation),
+                ts=str(decision["ts"]),
+                fingerprint="|".join(str(x) for x in _fp[:3]),
+            )
     hist = list(state.get("history") or [])
     hist.append(
         {
@@ -3422,6 +3448,7 @@ def _improve_once_impl(
     with contextlib.suppress(Exception):
         from moonshot.config_hash import config_hash as _obs_ch
         from moonshot.obs import (
+            coverage_unique_counts,
             enrich_ladder_rows,
             hunt_funnel_metrics,
             kill_histogram,
@@ -3429,6 +3456,11 @@ def _improve_once_impl(
         )
 
         _cache_stats = dict(feat_cache.get("_stats") or {})
+        _cov = coverage_unique_counts(
+            list(cand_list) + list(denser or []),
+            matrix_rows=list(tf_lev_matrix_rows or []),
+        )
+        decision["coverage"] = dict(_cov)
         _funnel = hunt_funnel_metrics(
             scout_in=int(funnel_counts.get("A_in") or len(_stage_a_cands)),
             scout_keep=int(funnel_counts.get("A_keep") or len(short_a)),
@@ -3443,6 +3475,10 @@ def _improve_once_impl(
             fold_pass=int(funnel_counts.get("fold_pass") or 0),
             promote_attempt=int(funnel_counts.get("promote_attempt") or 0),
             primary_metric="p25_fold_sortino",
+            n_unique_strat=int(_cov.get("n_unique_strat") or 0),
+            n_unique_tf=int(_cov.get("n_unique_tf") or 0),
+            n_unique_lev=int(_cov.get("n_unique_lev") or 0),
+            n_cand=int(_cov.get("n_cand") or 0),
         )
         _hist = kill_histogram(
             list(tf_lev_matrix_rows or []),
@@ -3482,9 +3518,15 @@ def _improve_once_impl(
                 "regime_reassess_needed": bool(state.get("regime_reassess_needed")),
                 "primary_metric": "p25_fold_sortino",
                 "funnel_conversion": dict(funnel_counts),
+                "coverage": dict(_cov),
+                "elite_archive_n": len(list(state.get("elite_archive") or [])),
+                "islands_n": len(
+                    (state.get("islands") or {}) if isinstance(state.get("islands"), dict) else {}
+                ),
                 "p25_sortino": (best_fold or {}).get("p25_sortino"),
                 "fold_roi": best_roi,
                 "cost_ok": bool(best_cost_ok),
+                "autopilot_frozen": bool(autopilot_frozen()),
             },
         )
     return decision
