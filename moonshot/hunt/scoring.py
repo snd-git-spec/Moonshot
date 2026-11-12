@@ -1615,7 +1615,8 @@ def _best_island_elite_cfg(
         for rows in islands.values():
             archive.extend(list(rows or []))
         archive.sort(key=_elite_rank_tuple, reverse=True)
-    live_fp = (
+    live_fp = repr(_cfg_fingerprint(base))
+    live_book = (
         f"{str(base.strategy).strip().lower()}|"
         f"{str(base.timeframe).strip().lower()}|"
         f"{int(base.leverage)}"
@@ -1626,6 +1627,22 @@ def _best_island_elite_cfg(
             continue
         fp = str((blob or {}).get("fingerprint") or "")
         if fp == live_fp:
+            continue
+        # Prefer a different book identity when available; else accept knob variants.
+        book = (
+            f"{str(kn.get('strategy') or '').strip().lower()}|"
+            f"{str(kn.get('timeframe') or '').strip().lower()}|"
+            f"{int(kn.get('leverage') or 0)}"
+        )
+        if book == live_book and any(
+            (
+                f"{str((x or {}).get('strategy') or '').strip().lower()}|"
+                f"{str((x or {}).get('timeframe') or '').strip().lower()}|"
+                f"{int((x or {}).get('leverage') or 0)}"
+            )
+            != live_book
+            for x in archive
+        ):
             continue
         try:
             return knobs_to_cfg(kn)

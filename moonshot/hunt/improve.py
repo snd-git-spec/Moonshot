@@ -3374,7 +3374,8 @@ def _improve_once_impl(
                 week_ret=float(best_week.get("ret") or 0),
                 generation=int(generation),
                 ts=str(decision["ts"]),
-                fingerprint="|".join(str(x) for x in _fp[:3]),
+                # Full knob fingerprint — strat|tf|lev alone collapses the archive.
+                fingerprint=repr(_fp),
             )
         # Also raise Stage A shortlist so islands fill with distinct fold elites.
         for _row in list(short_a or [])[: int(HUNT_ELITE_ARCHIVE_N)]:
@@ -3402,7 +3403,7 @@ def _improve_once_impl(
                 week_ret=None,
                 generation=int(generation),
                 ts=str(decision["ts"]),
-                fingerprint="|".join(str(x) for x in _fp_s[:3]),
+                fingerprint=repr(_fp_s),
             )
     # Coverage for finish meta / Pulse (unique S/T/L this pass).
     _cov_hist: dict = {}

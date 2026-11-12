@@ -22,6 +22,7 @@ def test_elite_archive_orders_by_p25_not_week():
         week_ret=0.9,
         generation=1,
         ts="2026-01-01T00:00:00Z",
+        fingerprint="fp-a",
     )
     _raise_elite_archive(
         state,
@@ -32,10 +33,29 @@ def test_elite_archive_orders_by_p25_not_week():
         week_ret=0.0,
         generation=2,
         ts="2026-01-02T00:00:00Z",
+        fingerprint="fp-b",
+    )
+    # Same strat|tf|lev but distinct knob fingerprint must both persist.
+    _raise_elite_archive(
+        state,
+        knobs={
+            "strategy": "momentum_15",
+            "timeframe": "5m",
+            "leverage": 10,
+            "adx_enter": 30.0,
+        },
+        p25_sortino=0.8,
+        roi=0.2,
+        cost_ok=True,
+        week_ret=0.1,
+        generation=3,
+        ts="2026-01-03T00:00:00Z",
+        fingerprint="fp-a-variant",
     )
     arch = state["elite_archive"]
     assert arch[0]["strategy"] == "trend_mtf"
     assert float(arch[0]["p25_sortino"]) == 1.5
+    assert len(arch) == 3
     assert "momentum_15|5m" in state["islands"]
     assert "trend_mtf|1h" in state["islands"]
 
