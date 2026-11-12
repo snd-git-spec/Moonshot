@@ -142,6 +142,48 @@ def test_should_ban_candidate_gate_fails():
     assert ok and "fold" in why
 
 
+def test_stage_b_cost_alone_does_not_ban():
+    """Stage B mirrors this call: week+fold only — cost_ok omitted so soft can run."""
+    from moonshot.hunt.scoring import _should_ban_candidate
+
+    week_ok = {"ret": 0.12, "trades": 8}
+    fold_ok = {"p25_sortino": 0.4, "ok": True, "trades": 20, "roi": 0.15}
+    # Promote-time still bans on cost when passed explicitly.
+    ban_promote, why = _should_ban_candidate(week=week_ok, fold=fold_ok, cost_ok=False)
+    assert ban_promote and why == "cost_2x_fail"
+    # Stage B shortlist call (no cost_ok=) must keep the candidate.
+    ban_b, why_b = _should_ban_candidate(week=week_ok, fold=fold_ok)
+    assert ban_b is False
+    assert why_b == ""
+
+
+def test_cost_ok_for_cfg_nonfinite_returns_nan(monkeypatch):
+    """Crash/unknown cost metrics stay NaN — not fake -1.0 definitive fails."""
+    import moonshot.hunt.fold_eval as fe
+    from moonshot.config import Config
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, *_a, **_k):
+            raise RuntimeError("scout cost boom")
+
+    monkeypatch.setattr(fe, "BacktestEngine", _Boom)
+    cfg = Config(strategy="momentum_15", timeframe="1h", leverage=5)
+    # Minimal SymbolData-shaped stub: only bars[-1].Index is read for end.
+    class _Bar:
+        Index = pd.Timestamp("2026-11-01", tz="UTC")
+
+    class _Sd:
+        bars = [_Bar(), _Bar()]
+
+    eligible, m1, m2 = fe.cost_ok_for_cfg({"BTC/USDT": _Sd()}, cfg, end=_Bar.Index)
+    assert eligible is False
+    assert math.isnan(m1)
+    assert math.isnan(m2)
+
+
 def test_champion_raise_fold_primary_not_week():
     from moonshot.hunt.scoring import _raise_champion_peak, _resolve_champion_peak
 

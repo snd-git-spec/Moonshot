@@ -1,0 +1,45 @@
+---
+description: Hunt search is unfinished until Stage B/soft actually run — never greenwash empty funnel
+alwaysApply: true
+---
+
+# Hunt funnel must finish (not Stage A theater)
+
+A hunt **pass ending** is not a **finished search**. HOLD + generation++ while the middle of the funnel is empty is a **broken search**, not progress.
+
+## Finished search (required reads on cloud)
+
+After any hunt/improve/deploy claim, read the latest history / HOLD log and cite:
+
+1. `funnel_counts.A_keep` (or Stage A keep)
+2. `funnel_counts.B` — **must be > 0** or say **search unfinished (Stage B empty)**
+3. `soft_runs` — **must be > 0** or say **search unfinished (soft-checked 0)**
+4. `promote_attempt` / `improved` / `.env` book if a promote was claimed
+
+If B = 0 or soft_runs = 0: the pass did **not** finish evaluating challengers. Do not say hunting is working, improved, or “still searching productively.”
+
+## Forbidden “green” for hunt (add to money-scoreboard bans)
+
+Never treat these alone as proof search works:
+
+- Stage A `best p25_sortino` / tried N ideas
+- `primary=p25_fold_sortino` in logs
+- Generation / improve_passes climbing
+- HOLD rows that reprint the same Live week/score
+- Matrix cell counts / “checked N ideas”
+- Elite archive growth while soft_runs = 0
+- Deploy/pulse/dashboard up
+
+## Diagnosis language (mandatory)
+
+- B = 0 because exceptions (e.g. `stage B failed: …`) → **funnel crash**, not “no edge”
+- B = 0 because every keep banned (`B:cost_2x_fail` etc.) before soft → **soft path starved**, say so; do not call that a completed search
+- soft_runs = 0 with A_keep > 0 → **stuck unfinished**, fix B/C path before more objective/diet/coverage work
+
+## Priority
+
+If funnel is unfinished (B=0 or soft=0), **stop** coverage thrash, strat diet, scoring tweaks, and dashboard copy. Fix the funnel so soft-check runs. Objective changes on a dead B/C path waste the user’s time and money.
+
+## Relation to other rules
+
+This does not replace money-scoreboard (paper PnL / `.env` / apply). It is the hunt-specific gate: **no soft_runs ⇒ no claim that search finished.**

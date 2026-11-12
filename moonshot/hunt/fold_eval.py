@@ -216,9 +216,9 @@ def cost_ok_for_cfg(
 
     m1 = _ret(1.0)
     m2 = _ret(2.0)
-    gate = cost_stress_gate(m1 if math.isfinite(m1) else -1.0, m2 if math.isfinite(m2) else -1.0)
-    return (
-        bool(gate.eligible),
-        float(m1) if math.isfinite(m1) else -1.0,
-        float(m2) if math.isfinite(m2) else -1.0,
-    )
+    # Non-finite → ineligible, but return NaN (not fake -1.0) so callers/logs
+    # do not treat "unknown/crash" as a definitive −100% cost fail.
+    if not math.isfinite(m1) or not math.isfinite(m2):
+        return False, float(m1), float(m2)
+    gate = cost_stress_gate(m1, m2)
+    return bool(gate.eligible), float(m1), float(m2)

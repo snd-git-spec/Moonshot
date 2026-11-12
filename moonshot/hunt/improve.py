@@ -1376,7 +1376,10 @@ def _improve_once_impl(
     )
 
     # ---- Stage B: full folds + cost on BTC scout (week diagnostic) ----
+    # Cost is ranked here but NOT ban-dropped — promote still enforces 2× cost.
+    # Ban+continue on cost starved soft_runs (unfinished search).
     stage_b: list = []
+    cost_deferred_b = 0
     _pass_heartbeat()
     _t_b = time.monotonic()
     for _p25_a, _ntr_a, _roi_a, cand, _ci, _co, _cheap, _fold_a in short_a:
@@ -1394,7 +1397,8 @@ def _improve_once_impl(
         except Exception as e:
             log.warning("stage B failed: %s", e)
             continue
-        do_ban, why_ban = _should_ban_candidate(week=cweek_s, fold=fold_b, cost_ok=cost_ok_b)
+        # Ban only week wipe / fold floor — never cost at B.
+        do_ban, why_ban = _should_ban_candidate(week=cweek_s, fold=fold_b)
         if do_ban:
             _banlist_add(
                 state, cand, week_ret=float(cweek_s.get("ret") or 0), reason=f"B:{why_ban}"
@@ -1402,6 +1406,8 @@ def _improve_once_impl(
             continue
         if cost_ok_b:
             funnel_counts["cost_pass"] += 1
+        else:
+            cost_deferred_b += 1
         if fold_b.get("ok"):
             funnel_counts["fold_pass"] += 1
         rk = _rank_key(
@@ -1429,8 +1435,14 @@ def _improve_once_impl(
     stage_b.sort(key=lambda row: row[0], reverse=True)
     shortlist = stage_b[:keep_b]
     funnel_counts["B"] = len(shortlist)
+    funnel_counts["cost_deferred_b"] = int(cost_deferred_b)
     _timing["stage_b_s"] = time.monotonic() - _t_b
     top_p25 = float(shortlist[0][1]) if shortlist else float("nan")
+    if cost_deferred_b:
+        log.info(
+            "stage B cost defer · %d kept for soft (cost gate stays on promote)",
+            cost_deferred_b,
+        )
     log.info(
         "halving B: %d → keep %d (best p25_sortino %+0.3f)",
         len(stage_b),
