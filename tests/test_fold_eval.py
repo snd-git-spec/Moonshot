@@ -142,19 +142,24 @@ def test_should_ban_candidate_gate_fails():
     assert ok and "fold" in why
 
 
-def test_stage_b_cost_alone_does_not_ban():
-    """Stage B mirrors this call: week+fold only — cost_ok omitted so soft can run."""
+def test_stage_b_cost_and_fold_do_not_ban():
+    """Stage B bans week wipe only — cost/fold deferred so soft can run."""
     from moonshot.hunt.scoring import _should_ban_candidate
 
     week_ok = {"ret": 0.12, "trades": 8}
-    fold_ok = {"p25_sortino": 0.4, "ok": True, "trades": 20, "roi": 0.15}
-    # Promote-time still bans on cost when passed explicitly.
-    ban_promote, why = _should_ban_candidate(week=week_ok, fold=fold_ok, cost_ok=False)
-    assert ban_promote and why == "cost_2x_fail"
-    # Stage B shortlist call (no cost_ok=) must keep the candidate.
-    ban_b, why_b = _should_ban_candidate(week=week_ok, fold=fold_ok)
+    week_wipe = {"ret": -0.35, "trades": 8}
+    fold_bad = {"p25_sortino": -0.4, "ok": False, "why": "p25 -0.4 < floor", "trades": 20}
+    # Promote/C still bans on cost/fold when passed explicitly.
+    ban_cost, why = _should_ban_candidate(week=week_ok, fold=fold_bad, cost_ok=False)
+    assert ban_cost and why == "cost_2x_fail"
+    ban_fold, why_f = _should_ban_candidate(week=week_ok, fold=fold_bad)
+    assert ban_fold and "fold" in why_f
+    # Stage B shortlist call: week only — negative fold must not drop soft path.
+    ban_b, why_b = _should_ban_candidate(week=week_ok)
     assert ban_b is False
     assert why_b == ""
+    ban_wipe, why_w = _should_ban_candidate(week=week_wipe)
+    assert ban_wipe and "week" in why_w
 
 
 def test_cost_ok_for_cfg_nonfinite_returns_nan(monkeypatch):
