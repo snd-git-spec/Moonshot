@@ -1355,6 +1355,7 @@ def _improve_once_impl(
     _sa_prep = (
         int((feat_cache.get("_stats") or {}).get("prepare_calls") or 0) - _stage_a_prep_before
     )
+    _best_p25 = float(short_a[0][0]) if short_a else float("nan")
     log.info(
         "halving A: tried %d · keep %d/%d (best p25_sortino %+0.3f) · "
         "feat_cache hits=%d prepare=%d",
