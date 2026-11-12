@@ -152,14 +152,38 @@ def sealed_holdout_gate(
     return True, "sealed_ok", meta
 
 
-def escape_sealed_floor_ok(sealed_week_ret: float | None) -> tuple[bool, str]:
+def escape_sealed_floor_ok(
+    sealed_week_ret: float | None,
+    live_sealed_week_ret: float | None = None,
+) -> tuple[bool, str]:
+    """Escape sealed gate — absolute floor, or relative when Live sealed is already dead.
+
+    Absolute ``escape_sealed_floor`` still blocks trash when Live sealed is healthy.
+    When Live sealed is already below that floor (death book), survive-first:
+    allow the escape if its sealed week is not materially worse than Live sealed
+    (``escape_sealed_vs_live_tol_pp``). Otherwise every less-bad TF/lev escape
+    dies forever while capital stays on the worse Live book.
+    """
     floor = float(HUNT_TARGETS.get("escape_sealed_floor", -0.10))
+    rel_tol = float(HUNT_TARGETS.get("escape_sealed_vs_live_tol_pp", 0.02))
     try:
         sw = float(sealed_week_ret) if sealed_week_ret is not None else None
     except (TypeError, ValueError):
         sw = None
+    try:
+        live_s = float(live_sealed_week_ret) if live_sealed_week_ret is not None else None
+    except (TypeError, ValueError):
+        live_s = None
     if sw is None:
         return False, "escape_sealed_missing"
+    # Live sealed already under absolute floor → relative survive-first.
+    if live_s is not None and live_s < floor:
+        if sw + 1e-12 >= live_s - rel_tol:
+            return True, "escape_sealed_vs_live_ok"
+        return False, (
+            f"escape_sealed {sw:+.0%} < live_sealed {live_s:+.0%}"
+            f"-{rel_tol:.0%} (live sealed already < floor {floor:+.0%})"
+        )
     if sw < floor:
         return False, f"escape_sealed {sw:+.0%} < floor {floor:+.0%}"
     return True, "escape_sealed_ok"

@@ -144,6 +144,9 @@ HUNT_TARGETS = {
     "sealed_week_floor": 0.0,
     "sealed_vs_live_edge": 0.008,  # match RESEARCH_MIN_WEEK_EDGE default spirit
     "escape_sealed_floor": -0.10,
+    # When Live sealed is already below escape_sealed_floor, allow escape if
+    # cand sealed is within this many pp of Live sealed (survive-first).
+    "escape_sealed_vs_live_tol_pp": 0.02,
     # Reject classic kill illusion: hard quit-while-ahead while soft bleeds
     "block_kill_illusion": True,
     # Refuse .env patch when research venue ≠ MEXC and MEXC holdout ≤ 0 while research > 0

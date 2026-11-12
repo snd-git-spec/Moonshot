@@ -2282,7 +2282,7 @@ def _improve_once_impl(
             sealed_ret = float(cand_sealed.get("ret") or 0)
             live_sealed_ret = float((live_sealed or {}).get("ret") or 0)
             if promote_provenance == "escape" or silence_rotate:
-                _sok, _swhy = escape_sealed_floor_ok(sealed_ret)
+                _sok, _swhy = escape_sealed_floor_ok(sealed_ret, live_sealed_ret)
                 sealed_meta = {
                     "evaluated": True,
                     "passed": bool(_sok),
@@ -2298,14 +2298,9 @@ def _improve_once_impl(
                     promote_reason = "hold"
                     promote_provenance = None
                     log.info("escape sealed blocked: %s", _swhy)
-                    _db, _dw = _should_ban_candidate(sealed_fail=True)
-                    if _db:
-                        _banlist_add(
-                            state,
-                            best_cfg,
-                            week_ret=float(best_week.get("ret") or 0),
-                            reason=f"escape_sealed:{_dw}",
-                        )
+                    # Do NOT banlist escape sealed near-misses — absolute floor
+                    # vs an already-dead Live sealed was permanently killing the
+                    # only less-bad TF/lev escape while capital stayed on Live.
             else:
                 _sok, _swhy, sealed_meta = sealed_holdout_gate(
                     sealed_week_ret=sealed_ret,
