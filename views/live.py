@@ -1450,11 +1450,53 @@ def live_panel() -> None:
         setups_seen = int(live.get("setups_seen") or 0)
         bal_pnl = (float(last_eq) - float(start_eq)) if last_eq is not None else None
         n_closed = len(trades)
+        try:
+            n_open = int(live.get("open") or 0)
+        except (TypeError, ValueError):
+            n_open = 0
+        if n_open <= 0:
+            try:
+                import sqlite3
 
-        if n_closed == 0 and setups_seen == 0 and bars_seen > 20:
+                from moonshot.paths import DB_PATH as _DBP
+
+                _con = sqlite3.connect(str(_DBP))
+                try:
+                    n_open = int(_con.execute("SELECT COUNT(*) FROM positions").fetchone()[0])
+                finally:
+                    _con.close()
+            except Exception:
+                n_open = 0
+        try:
+            hist_bars = int(live.get("hist_bars") or 0)
+        except (TypeError, ValueError):
+            hist_bars = 0
+        if hist_bars <= 0:
+            try:
+                from moonshot.config import Config
+                from moonshot.data import live_history_bars_for_tf
+
+                _cfg = Config.from_env()
+                hist_bars = int(_cfg.live_history_bars or 0) or int(
+                    live_history_bars_for_tf(str(_cfg.timeframe or tf or "1h"))
+                )
+            except Exception:
+                hist_bars = 0
+
+        # bars_seen = live decision ticks since process restart (symbols × new
+        # candle closes). NOT the indicator history depth (often thousands).
+        if n_closed == 0 and n_open == 0 and setups_seen == 0 and bars_seen > 20:
             st.warning(
-                f"The practice bot has watched {bars_seen} new candles since it last restarted "
-                "and still has not found a trade to take — filters are too tight right now."
+                f"No new practice entries since the last paper restart "
+                f"({bars_seen} live {tf} decision ticks across the coin list). "
+                f"Indicators still warm on ~{hist_bars:,} history bars — that is not "
+                f"what this counter measures. Filters may be quiet on this book right now."
+            )
+        elif n_closed == 0 and n_open > 0:
+            st.info(
+                f"Practice wallet has {n_open} open position"
+                f"{'s' if n_open != 1 else ''} from ${start_eq:.0f} start — "
+                f"waiting on a close before the closed-trade scoreboard moves."
             )
         elif n_closed == 0:
             st.info(
@@ -1514,12 +1556,7 @@ def live_panel() -> None:
             live_s = str(getattr(cfg_env, "strategy", "") or "") if cfg_env else ""
             live_tf = str(getattr(cfg_env, "timeframe", "") or "") if cfg_env else ""
             live_lev = int(getattr(cfg_env, "leverage", 0) or 0) if cfg_env else 0
-            if (
-                c_ret is not None
-                and c_strat == live_s
-                and c_tf == live_tf
-                and c_lev == live_lev
-            ):
+            if c_ret is not None and c_strat == live_s and c_tf == live_tf and c_lev == live_lev:
                 c_span = str(peak_blob.get("week_span") or week_span or "")
                 peak_note = f" · peak when found was {c_ret:+.0%}"
                 if c_span:
@@ -1532,8 +1569,7 @@ def live_panel() -> None:
                 "hint": (
                     f"${start_eq:,.0f} → ${week_final:,.0f} ({week_ret:+.0%}) "
                     f"simulated from past candles · goal ≥ {week_goal:.0%} · "
-                    f"{week_n} trades in that holdout"
-                    + peak_note
+                    f"{week_n} trades in that holdout" + peak_note
                 ),
                 "tone": week_tone,
             },
@@ -1557,16 +1593,18 @@ def live_panel() -> None:
         )
         hero_panel(level, headline, detail, hero_stats)
 
-        # Only mention candle progress when the wallet is still quiet
+        # Live decision ticks ≠ history warm. Only show when wallet still has no closes.
         if n_closed == 0 and bars_seen > 0:
+            _hist = f" · history warm ~{hist_bars:,} bars" if hist_bars else ""
             st.caption(
-                f"Since last restart: watched {bars_seen} new candle"
-                f"{'s' if bars_seen != 1 else ''}"
+                f"Since last paper restart: {bars_seen} live {tf} decision ticks"
+                f" (coin×candle closes), not full history{_hist}"
                 + (
-                    f", found {setups_seen} trade signal{'s' if setups_seen != 1 else ''}."
+                    f" · {setups_seen} entry signal{'s' if setups_seen != 1 else ''}"
                     if setups_seen
-                    else ", no trade signals yet."
+                    else " · no new entry signals yet"
                 )
+                + (f" · {n_open} open" if n_open else "")
             )
 
         goals = _goals(grade or elite, targets)

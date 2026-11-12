@@ -461,6 +461,7 @@ class LiveRunner:
                 equity=round(equity, 2),
                 bars_seen=int(self._bars_seen),
                 setups_seen=int(self._signals_seen),
+                hist_bars=int(self.cfg.live_history_bars or 0),
                 adx_enter=float(self.cfg.adx_enter),
                 vol_mult=float(self.cfg.volume_multiplier),
                 require_rising_adx=bool(self.cfg.require_rising_adx),
