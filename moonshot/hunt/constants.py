@@ -244,6 +244,19 @@ def autopilot_frozen() -> bool:
     return os.getenv("AUTOPILOT_FROZEN", "0").strip() in ("1", "true", "TRUE", "yes", "YES")
 
 
+def hunt_legacy_scoring() -> bool:
+    """Comparison-only week-primary rank. Never deploy while this is on."""
+    import os
+
+    return os.getenv("HUNT_LEGACY_SCORING", "0").strip() in (
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "YES",
+    )
+
+
 def _hunt_soft_workers() -> int:
     """Parallel soft-check workers (1–4). Default 1 (2G droplet); override via HUNT_SOFT_WORKERS."""
     raw = os.getenv("HUNT_SOFT_WORKERS", "").strip()

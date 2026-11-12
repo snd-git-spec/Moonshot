@@ -93,6 +93,73 @@ def _tf_from_config_json(raw: str | None) -> str | None:
     return str(tf) if tf is not None else None
 
 
+def _stats_for_items(
+    key: str,
+    items: list[dict[str, Any]],
+    *,
+    config_hash: str | None,
+    symbol: str | None,
+    timeframe: str | None,
+    legacy: bool,
+) -> BucketStats:
+    rs = [float(x.get("r_multiple") or 0.0) for x in items]
+    risks = [float(x.get("initial_risk_dollars") or 0.0) for x in items]
+    fees = [float(x.get("fees") or 0.0) for x in items]
+    funding = [float(x.get("funding") or 0.0) for x in items]
+    mean_r, lo, hi = bootstrap_mean_ci(rs)
+    wins = sum(1 for r in rs if r > 0)
+    pnls = [float(x.get("pnl") or 0.0) for x in items]
+    eq = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for p in pnls:
+        eq += p
+        peak = max(peak, eq)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - eq) / peak)
+    return BucketStats(
+        key=key,
+        config_hash=config_hash,
+        symbol=symbol,
+        timeframe=timeframe,
+        n=len(items),
+        win_rate=wins / len(items) if items else 0.0,
+        mean_r=mean_r,
+        ci_low=lo,
+        ci_high=hi,
+        cost_share=cost_share_dollars(rs, risks, fees, funding),
+        max_dd=max_dd,
+        liquidations=sum(int(x.get("liquidated") or 0) for x in items),
+        legacy=legacy,
+    )
+
+
+def bucket_trades_by_hash(rows: Iterable[dict[str, Any]]) -> list[BucketStats]:
+    """Phase 0 KEEP/STOP scoreboard: one bucket per config_hash (all symbols)."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        ch = row.get("config_hash")
+        if ch is None or ch == "":
+            key = "LEGACY"
+        else:
+            key = str(ch)
+        groups.setdefault(key, []).append(row)
+    out: list[BucketStats] = []
+    for key, items in sorted(groups.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))):
+        legacy = key == "LEGACY"
+        out.append(
+            _stats_for_items(
+                key=key,
+                items=items,
+                config_hash=None if legacy else key,
+                symbol=None,
+                timeframe=None,
+                legacy=legacy,
+            )
+        )
+    return out
+
+
 def bucket_trades(rows: Iterable[dict[str, Any]]) -> list[BucketStats]:
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for row in rows:
@@ -105,37 +172,15 @@ def bucket_trades(rows: Iterable[dict[str, Any]]) -> list[BucketStats]:
 
     out: list[BucketStats] = []
     for key, items in sorted(groups.items(), key=lambda kv: str(kv[0])):
-        rs = [float(x.get("r_multiple") or 0.0) for x in items]
-        risks = [float(x.get("initial_risk_dollars") or 0.0) for x in items]
-        fees = [float(x.get("fees") or 0.0) for x in items]
-        funding = [float(x.get("funding") or 0.0) for x in items]
-        mean_r, lo, hi = bootstrap_mean_ci(rs)
-        wins = sum(1 for r in rs if r > 0)
-        pnls = [float(x.get("pnl") or 0.0) for x in items]
-        eq = 0.0
-        peak = 0.0
-        max_dd = 0.0
-        for p in pnls:
-            eq += p
-            peak = max(peak, eq)
-            if peak > 0:
-                max_dd = max(max_dd, (peak - eq) / peak)
         legacy = key[0] == "LEGACY"
         ch = None if legacy else str(key[0])
         out.append(
-            BucketStats(
+            _stats_for_items(
                 key=str(key),
+                items=items,
                 config_hash=ch,
                 symbol=None if legacy else key[1],
                 timeframe=None if legacy else key[2],
-                n=len(items),
-                win_rate=wins / len(items) if items else 0.0,
-                mean_r=mean_r,
-                ci_low=lo,
-                ci_high=hi,
-                cost_share=cost_share_dollars(rs, risks, fees, funding),
-                max_dd=max_dd,
-                liquidations=sum(int(x.get("liquidated") or 0) for x in items),
                 legacy=legacy,
             )
         )
@@ -175,11 +220,9 @@ def locked_criteria_text() -> str:
     )
 
 
-def render_report(buckets: Sequence[BucketStats]) -> str:
+def _render_bucket_table(buckets: Sequence[BucketStats], *, title: str) -> list[str]:
     lines = [
-        f"# Paper expectancy {datetime.now(timezone.utc).isoformat()}",
-        "",
-        locked_criteria_text(),
+        f"## {title}",
         "",
         "| bucket | n | win% | mean_R | CI95 | cost_share | maxDD | liq | decision |",
         "|---|---:|---:|---:|---|---:|---:|---:|---|",
@@ -201,6 +244,27 @@ def render_report(buckets: Sequence[BucketStats]) -> str:
             f"{cs} | {b.max_dd:.1%} | {b.liquidations} | {b.decision_label()} |"
         )
     lines.append("")
+    return lines
+
+
+def render_report(
+    buckets: Sequence[BucketStats],
+    *,
+    by_hash: Sequence[BucketStats] | None = None,
+) -> str:
+    lines = [
+        f"# Paper expectancy {datetime.now(timezone.utc).isoformat()}",
+        "",
+        locked_criteria_text(),
+        "",
+    ]
+    if by_hash is not None:
+        lines.extend(
+            _render_bucket_table(by_hash, title="By config_hash (KEEP/STOP scoreboard)")
+        )
+    lines.extend(
+        _render_bucket_table(buckets, title="By config_hash × symbol × TF (detail)")
+    )
     return "\n".join(lines)
 
 
@@ -208,8 +272,10 @@ def write_expectancy_report(
     db_path: Path | str,
     out_dir: Path | str = "runs",
 ) -> Path:
-    buckets = bucket_trades(load_trade_rows(db_path))
-    text = render_report(buckets)
+    rows = load_trade_rows(db_path)
+    by_hash = bucket_trades_by_hash(rows)
+    buckets = bucket_trades(rows)
+    text = render_report(buckets, by_hash=by_hash)
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

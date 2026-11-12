@@ -9,6 +9,7 @@ from pathlib import Path
 from moonshot.paper_expectancy import (
     COST_SHARE_STOP_THRESHOLD,
     bucket_trades,
+    bucket_trades_by_hash,
     cost_share_dollars,
     load_trade_rows,
 )
@@ -123,3 +124,9 @@ def test_paper_expectancy_exact_values():
     # gross = 1*50 + (-0.5)*50 + 4 = 25+4=29; cost_share=4/29
     assert abs(b.cost_share - 4.0 / 29.0) < 1e-12
     assert math.isfinite(b.ci_low)
+    by_hash = bucket_trades_by_hash(rows)
+    assert len(by_hash) == 1
+    assert by_hash[0].config_hash == "hash1"
+    assert by_hash[0].n == 2
+    assert by_hash[0].symbol is None
+    assert by_hash[0].decision_label() == "EXTEND-or-WAIT"

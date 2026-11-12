@@ -56,6 +56,7 @@ from moonshot.hunt.constants import (
     HUNT_STUCK_SOFT_BUDGET,
     PAPER_BLEED_FORCE_ROTATE,
     HUNT_CURRICULUM_SYMBOLS,
+    HUNT_ELITE_ARCHIVE_N,
     HUNT_HALVING_A_DAYS,
     HUNT_HALVING_A_KEEP,
     HUNT_HALVING_B_KEEP,
@@ -83,6 +84,7 @@ from moonshot.hunt.constants import (
     _utc_now,
     _week_delta_needed,
     autopilot_frozen,
+    hunt_legacy_scoring,
 )
 from moonshot.hunt.scoring import (
     HUNT_EXHAUSTED_GENS,
@@ -2977,6 +2979,19 @@ def _improve_once_impl(
     )
     week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
     week_gap = max(0.0, week_tgt - float(best_week.get("ret") or 0))
+    if improved and hunt_legacy_scoring():
+        log.warning(
+            "HUNT_LEGACY_SCORING=1: promote blocked — comparison flag never deploys"
+        )
+        decision["promote_suppressed"] = True
+        decision["improved"] = False
+        decision["promote_tier"] = "hold"
+        decision["message"] = (
+            "LEGACY_SCORING — week-primary comparison on; never deploy from this mode."
+        )
+        improved = False
+        promote_tier = "hold"
+        _live_feed("hold", decision["message"], generation=generation)
     if improved and autopilot_frozen():
         log.info("AUTOPILOT_FROZEN=1: promotion suppressed")
         decision["promote_suppressed"] = True
@@ -3361,6 +3376,43 @@ def _improve_once_impl(
                 ts=str(decision["ts"]),
                 fingerprint="|".join(str(x) for x in _fp[:3]),
             )
+        # Also raise Stage A shortlist so islands fill with distinct fold elites.
+        for _row in list(short_a or [])[: int(HUNT_ELITE_ARCHIVE_N)]:
+            try:
+                _p25_s, _ntr_s, _roi_s, _cand_s, _ci_s, _co_s, _cheap_s, _fold_s = _row
+            except (TypeError, ValueError):
+                continue
+            try:
+                _p25_s = float(_p25_s)
+            except (TypeError, ValueError):
+                continue
+            if _p25_s != _p25_s or _p25_s <= -900:
+                continue
+            try:
+                _kn_s = _cfg_to_knobs(_cand_s)
+                _fp_s = _cfg_fingerprint(_cand_s)
+            except Exception:
+                continue
+            _raise_elite_archive(
+                state,
+                knobs=_kn_s,
+                p25_sortino=_p25_s,
+                roi=float(_roi_s) if _roi_s is not None else None,
+                cost_ok=True,
+                week_ret=None,
+                generation=int(generation),
+                ts=str(decision["ts"]),
+                fingerprint="|".join(str(x) for x in _fp_s[:3]),
+            )
+    # Coverage for finish meta / Pulse (unique S/T/L this pass).
+    _cov_hist: dict = {}
+    with contextlib.suppress(Exception):
+        from moonshot.obs import coverage_unique_counts as _cov_fn
+
+        _cov_hist = _cov_fn(
+            list(cand_list) + list(denser or []),
+            matrix_rows=list(tf_lev_matrix_rows or []),
+        )
     hist = list(state.get("history") or [])
     hist.append(
         {
@@ -3376,6 +3428,15 @@ def _improve_once_impl(
             "tested": tested,
             "soft_runs": soft_runs,
             "search_mode": search_mode,
+            "primary_metric": "p25_fold_sortino",
+            "n_unique_strat": int((_cov_hist or {}).get("n_unique_strat") or 0),
+            "n_unique_tf": int((_cov_hist or {}).get("n_unique_tf") or 0),
+            "n_unique_lev": int((_cov_hist or {}).get("n_unique_lev") or 0),
+            "n_cand": int((_cov_hist or {}).get("n_cand") or 0),
+            "funnel_counts": dict(funnel_counts),
+            "elite_archive_n": len(list(state.get("elite_archive") or [])),
+            "autopilot_frozen": bool(autopilot_frozen()),
+            "hunt_legacy_scoring": bool(hunt_legacy_scoring()),
             "train_exp": decision["best"]["train_exp"],
             "test_exp": decision["best"]["test_exp"],
             "train_n": decision["best"]["train_n"],

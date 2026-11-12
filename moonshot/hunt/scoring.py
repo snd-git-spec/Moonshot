@@ -2218,8 +2218,12 @@ def _rank_key(
     """Hunt sort: p25 fold Sortino → cost_ok → ROI; week is trailing diagnostic only.
 
     Dashboard week / +100% goal remains in ``_grade`` for Live display — not primary here.
+    ``HUNT_LEGACY_SCORING=1`` flips to week-primary for comparison only — promote apply
+    is blocked separately in improve (never deploy from legacy).
     """
     import math
+
+    from moonshot.hunt.constants import hunt_legacy_scoring
 
     soft_ret = float(soft_oos.total_return) if soft_oos is not None else float(oos.total_return)
     week_ret = float((week or {}).get("ret") or -999.0)
@@ -2238,7 +2242,7 @@ def _rank_key(
     if roi is None or not math.isfinite(float(roi)):
         roi = float(oos.total_return)
     g = _grade(ins, oos, soft_oos, week=week)
-    return (
+    fold_tuple = (
         float(p25),
         int(cost_i),
         float(roi),
@@ -2250,6 +2254,21 @@ def _rank_key(
         int(oos.trades),
         -float(oos.max_drawdown),
     )
+    if hunt_legacy_scoring():
+        # Week-first shadow ranking — comparison / ablate only.
+        return (
+            week_ret,
+            int(g.get("score_raw", g["score"])),
+            soft_ret,
+            float(oos.win_rate),
+            float(oos.expectancy_r),
+            int(oos.trades),
+            -float(oos.max_drawdown),
+            float(p25),
+            int(cost_i),
+            float(roi),
+        )
+    return fold_tuple
 
 
 def _beats(
