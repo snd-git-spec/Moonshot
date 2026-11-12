@@ -11,7 +11,9 @@ from moonshot.paper_expectancy import (
     bucket_trades,
     bucket_trades_by_hash,
     cost_share_dollars,
+    filter_rows_to_pinned,
     load_trade_rows,
+    render_report,
 )
 
 
@@ -130,3 +132,45 @@ def test_paper_expectancy_exact_values():
     assert by_hash[0].n == 2
     assert by_hash[0].symbol is None
     assert by_hash[0].decision_label() == "EXTEND-or-WAIT"
+
+
+def test_filter_rows_to_pinned_excludes_old_tf():
+    rows = [
+        {
+            "config_hash": "pinned",
+            "symbol": "BTC/USDT:USDT",
+            "r_multiple": 1.0,
+            "pnl": 1.0,
+            "fees": 0.0,
+            "funding": 0.0,
+            "liquidated": 0,
+            "config_json": '{"timeframe":"1h"}',
+            "initial_risk_dollars": 10.0,
+        },
+        {
+            "config_hash": "old5m",
+            "symbol": "BTC/USDT:USDT",
+            "r_multiple": -1.0,
+            "pnl": -1.0,
+            "fees": 0.0,
+            "funding": 0.0,
+            "liquidated": 0,
+            "config_json": '{"timeframe":"5m"}',
+            "initial_risk_dollars": 10.0,
+        },
+    ]
+    kept, n_ex = filter_rows_to_pinned(rows, "pinned")
+    assert n_ex == 1
+    assert len(kept) == 1
+    assert kept[0]["config_hash"] == "pinned"
+    by_hash = bucket_trades_by_hash(kept)
+    assert len(by_hash) == 1 and by_hash[0].config_hash == "pinned"
+    text = render_report(
+        bucket_trades(kept),
+        by_hash=by_hash,
+        pinned_hash="pinned",
+        n_excluded=n_ex,
+    )
+    assert "old5m" not in text
+    assert "Pinned config_hash: `pinned`" in text
+    assert "Excluded non-pinned closes" in text

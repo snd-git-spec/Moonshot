@@ -14,6 +14,7 @@ Research/hunt may still run; promote apply and paper restart from hunt are suppr
 - Timeframe: `1h`
 - Leverage: `5`
 - `LIVE_TRADING_ENABLED=0` (practice only)
+- Pinned `config_hash` (from live `.env` book): `3f689065ab7153af`
 
 Every paper close must carry `config_hash` (already wired in live/paper path).
 
@@ -21,11 +22,19 @@ Every paper close must carry `config_hash` (already wired in live/paper path).
 
 `2026-11-12T10:50:00+00:00` — Phase 0 freeze for post-escape `5x@1h` measurement.
 
+## Decision identity (pinned hash only)
+
+Phase 0 KEEP / STOP / EXTEND is scored **only** on closes whose `config_hash`
+equals the pinned book hash above. Old `5m` / other-leverage / LEGACY rows are
+**excluded** from the decision table (they must not pollute EXTEND / mean R).
+
+`scripts/paper_expectancy.py` and autopilot refresh default to `pinned_only=True`.
+
 ## Legacy / pre-window trades
 
-Rows with `config_hash IS NULL` are the **legacy** bucket — excluded from KEEP/STOP.
-Closes under other hashes (e.g. prior `10x@5m`) are separate buckets; the decision
-for this window uses the pinned book’s hash only.
+Rows with `config_hash IS NULL` are the **legacy** bucket — excluded.
+Closes under other hashes (e.g. prior `10x@5m`) are excluded from this window’s
+decision (not merely listed as separate buckets).
 
 ## Time cap
 
@@ -34,11 +43,14 @@ for this window uses the pinned book’s hash only.
 
 ## LOCKED acceptance criteria (written before looking)
 
-- **KEEP-VALIDATED:** `n >= 100` AND bootstrap 95% CI on `mean(r_multiple)` excludes 0 and is positive
-- **STOP:** `n >= 100` AND (`mean(r_multiple) <= 0` OR CI includes 0)
-  - If `cost_share > 40%` → execution problem → fix fills/costs first
-  - If `cost_share <= 40%` → retire this hash; do not polish it; restart research under fold-primary gates only
-- **EXTEND:** `n < 100` → keep measuring; no tuning of this book
+Decision rule (pinned hash only):
+
+1. **KEEP-VALIDATED:** `n >= 100` AND bootstrap 95% CI on `mean(r_multiple)` excludes 0 and is positive
+2. **STOP:** `n >= 100` AND (`mean(r_multiple) <= 0` OR CI includes 0)
+   - If `cost_share > 40%` → execution problem → fix fills/costs first
+   - If `cost_share <= 40%` → retire this hash; do not polish it; restart research under fold-primary gates only
+3. **EXTEND:** `n < 100` → keep measuring; no tuning of this book
+   - At the **8-week** time cap with `n < 100` → EXTEND +4 weeks (still no tuning)
 
 ## LOCKED units note
 

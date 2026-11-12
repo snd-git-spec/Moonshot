@@ -211,12 +211,35 @@ def load_trade_rows(db_path: Path | str) -> list[dict[str, Any]]:
         con.close()
 
 
+def resolve_pinned_config_hash() -> str | None:
+    """Current Live/paper book hash from env (Phase 0 KEEP/STOP identity)."""
+    try:
+        from moonshot.config import Config
+        from moonshot.config_hash import config_hash as _ch
+
+        return str(_ch(Config.from_env()))
+    except Exception:
+        return None
+
+
+def filter_rows_to_pinned(
+    rows: Sequence[dict[str, Any]],
+    pinned_hash: str | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep only pinned config_hash rows. Returns (kept, n_excluded)."""
+    if not pinned_hash:
+        return list(rows), 0
+    kept = [r for r in rows if str(r.get("config_hash") or "") == str(pinned_hash)]
+    return kept, max(0, len(rows) - len(kept))
+
+
 def locked_criteria_text() -> str:
     return (
-        "LOCKED: KEEP if n>=100 and bootstrap 95% CI on mean(r_multiple) excludes 0 and positive; "
-        "STOP if n>=100 and (mean<=0 or CI includes 0); "
+        "LOCKED (pinned hash only): KEEP if n>=100 and bootstrap 95% CI on mean(r_multiple) "
+        "excludes 0 and positive; STOP if n>=100 and (mean<=0 or CI includes 0); "
         "if cost_share>40% → STOP-execution (Phase E); else STOP-no-edge; "
-        "n<100 at 8w → EXTEND. Units: net r_multiple; dollar cost_share."
+        "n<100 → EXTEND until 8w cap (then +4w EXTEND). Other hashes / old 5m excluded. "
+        "Units: net r_multiple; dollar cost_share."
     )
 
 
@@ -251,6 +274,8 @@ def render_report(
     buckets: Sequence[BucketStats],
     *,
     by_hash: Sequence[BucketStats] | None = None,
+    pinned_hash: str | None = None,
+    n_excluded: int = 0,
 ) -> str:
     lines = [
         f"# Paper expectancy {datetime.now(timezone.utc).isoformat()}",
@@ -258,24 +283,68 @@ def render_report(
         locked_criteria_text(),
         "",
     ]
-    if by_hash is not None:
-        lines.extend(
-            _render_bucket_table(by_hash, title="By config_hash (KEEP/STOP scoreboard)")
+    if pinned_hash:
+        lines.append(f"Pinned config_hash: `{pinned_hash}`")
+        lines.append(
+            f"Excluded non-pinned closes (old books / other TF): **{int(n_excluded)}**"
         )
-    lines.extend(
-        _render_bucket_table(buckets, title="By config_hash × symbol × TF (detail)")
+        lines.append("")
+    if by_hash is not None:
+        title = (
+            "Pinned config_hash KEEP/STOP scoreboard"
+            if pinned_hash
+            else "By config_hash (KEEP/STOP scoreboard)"
+        )
+        if pinned_hash and not by_hash:
+            # Explicit empty window — do not imply pollution from other hashes.
+            by_hash = [
+                BucketStats(
+                    key=str(pinned_hash),
+                    config_hash=str(pinned_hash),
+                    symbol=None,
+                    timeframe=None,
+                    n=0,
+                    win_rate=0.0,
+                    mean_r=float("nan"),
+                    ci_low=float("nan"),
+                    ci_high=float("nan"),
+                    cost_share=float("nan"),
+                    max_dd=0.0,
+                    liquidations=0,
+                    legacy=False,
+                )
+            ]
+        lines.extend(_render_bucket_table(by_hash, title=title))
+    detail_title = (
+        "Pinned hash × symbol × TF (detail)"
+        if pinned_hash
+        else "By config_hash × symbol × TF (detail)"
     )
+    lines.extend(_render_bucket_table(buckets, title=detail_title))
     return "\n".join(lines)
 
 
 def write_expectancy_report(
     db_path: Path | str,
     out_dir: Path | str = "runs",
+    *,
+    pinned_hash: str | None = None,
+    pinned_only: bool = True,
 ) -> Path:
+    """Write expectancy MD. Default: Phase 0 pinned-hash-only (excludes old 5m)."""
     rows = load_trade_rows(db_path)
+    pin = pinned_hash if pinned_hash is not None else resolve_pinned_config_hash()
+    n_excluded = 0
+    if pinned_only and pin:
+        rows, n_excluded = filter_rows_to_pinned(rows, pin)
     by_hash = bucket_trades_by_hash(rows)
     buckets = bucket_trades(rows)
-    text = render_report(buckets, by_hash=by_hash)
+    text = render_report(
+        buckets,
+        by_hash=by_hash,
+        pinned_hash=pin if pinned_only else None,
+        n_excluded=n_excluded,
+    )
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
