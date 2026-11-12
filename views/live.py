@@ -1770,26 +1770,30 @@ def live_panel() -> None:
             )
 
         from moonshot.hunt.search_labels import (
-            holdout_column_name,
-            holdout_week_note,
-            matrix_scored_label,
-            oos_week_note,
+            coverage_label,
+            funnel_label,
+            live_holdout_label,
+            nearest_miss_label,
             robust_flag_note,
             what_happened_label,
         )
 
-        _holdout_col = holdout_column_name(_HOLDOUT)
         section_header(
             "Recent searches",
-            "Newest first — better setup, escape deploy, or nothing better?",
+            "Newest first — what each hunt pass actually did",
         )
         st.caption(
-            "Hunt activity only. Escape = left a worse Live book without period-robust. "
-            "**Matrix scored** = lev×TF cells checked that pass. "
-            "What paper trades is on the tiles above — not in this log."
+            "Hunt activity log (not a Live scoreboard). "
+            "**Funnel** = Stage A keep → B shortlist → soft-checks. "
+            "**Nearest miss** = best challenger that did not promote. "
+            "**Live holdout** = deployed book week (stays flat on HOLD). "
+            "Escape = left a worse Live book without period-robust."
         )
         if held_streak >= 3:
-            st.caption(f"Last {held_streak} searches found nothing better (score {score}/100).")
+            st.caption(
+                f"Last {held_streak} searches found nothing better "
+                f"(Live score {score}/100) — see Funnel / Nearest miss per row."
+            )
 
         # Dedupe key keeps silence + HOLD same gen visible (gen alone hid money truth).
         seen_keys: set[tuple] = set()
@@ -1814,13 +1818,11 @@ def live_panel() -> None:
                     "Search #": running_gen,
                     "When (UTC)": _fmt_utc(he.get("ts")),
                     "What happened": f"In progress · {mode}",
-                    "Matrix scored": "running…",
-                    "Score": "—",
-                    "Win rate": "—",
-                    _holdout_col: "—",
-                    "Long OOS": "—",
+                    "Funnel": "running…",
+                    "Coverage": "—",
+                    "Nearest miss": "—",
+                    "Live holdout": "—",
                     "Gate": "—",
-                    "Avg profit": "—",
                 }
             )
             seen_keys.add((int(running_gen), "running", True))
@@ -1836,23 +1838,16 @@ def live_panel() -> None:
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-            te = h.get("test_exp")
-            w = h.get("win")
-            result = what_happened_label(h)
-            week_note = holdout_week_note(h)
-            sc = h.get("score")
             rows.append(
                 {
                     "Search #": h.get("generation"),
                     "When (UTC)": _fmt_utc(h.get("ts")),
-                    "What happened": result,
-                    "Matrix scored": matrix_scored_label(h),
-                    "Score": sc if sc is not None else "—",
-                    "Win rate": f"{float(w):.0%}" if w is not None else "—",
-                    _holdout_col: week_note,
-                    "Long OOS": oos_week_note(h),
+                    "What happened": what_happened_label(h),
+                    "Funnel": funnel_label(h),
+                    "Coverage": coverage_label(h),
+                    "Nearest miss": nearest_miss_label(h),
+                    "Live holdout": live_holdout_label(h),
                     "Gate": robust_flag_note(h),
-                    "Avg profit": pct_of_risk(float(te)) if te is not None else "—",
                 }
             )
             if len(rows) >= 24:

@@ -1,11 +1,15 @@
-"""Recent searches labels: better found, escape, or not — no jargon lies."""
+"""Recent searches labels: show hunt activity, not Live reprints."""
 
 from __future__ import annotations
 
 from moonshot.hunt.search_labels import (
+    coverage_label,
+    funnel_label,
     holdout_column_name,
     holdout_week_note,
+    live_holdout_label,
     matrix_scored_label,
+    nearest_miss_label,
     oos_week_note,
     robust_flag_note,
     what_happened_label,
@@ -91,21 +95,76 @@ def test_champion_rescue_escape_not_better():
     assert msg == _ESCAPE
 
 
-def test_hold_is_no_better():
+def test_hold_shows_mode_and_soft():
     msg = what_happened_label(
         {
             "improved": False,
-            "promote_reason": "matrix_escape",
-            "tested": 46,
+            "promote_reason": "baseline",
+            "search_mode": "explore",
+            "tested": 25,
+            "soft_runs": 14,
+            "funnel_counts": {"A_keep": 16, "B": 14},
             "material_why": "identical knobs",
         }
     )
-    assert msg == "No better setup found · checked 46 ideas"
-    assert "champion" not in msg.lower()
+    assert "explore" in msg
+    assert "soft-checked 14" in msg
+    assert "tried 25" in msg
     assert "identical" not in msg.lower()
 
 
-def test_holdout_week_is_just_percent():
+def test_hold_unfinished_when_soft_zero():
+    msg = what_happened_label(
+        {
+            "improved": False,
+            "search_mode": "breakout",
+            "tested": 38,
+            "soft_runs": 0,
+            "funnel_counts": {"A_keep": 16, "B": 0},
+        }
+    )
+    assert "unfinished" in msg
+    assert "breakout" in msg
+
+
+def test_funnel_and_coverage_labels():
+    h = {
+        "soft_runs": 14,
+        "tested": 25,
+        "n_unique_strat": 3,
+        "n_unique_tf": 4,
+        "n_unique_lev": 5,
+        "funnel_counts": {"A_keep": 16, "B": 14},
+        "tf_lev_matrix": [
+            {"tf": "5m", "leverage": 5},
+            {"tf": "1h", "leverage": 10},
+        ],
+    }
+    assert funnel_label(h) == "A16→B14→soft14"
+    assert "3 strat" in coverage_label(h)
+    assert "unfinished" in funnel_label(
+        {"soft_runs": 0, "funnel_counts": {"A_keep": 16, "B": 0}}
+    )
+
+
+def test_nearest_miss_and_live_holdout():
+    h = {
+        "improved": False,
+        "week_return": -0.017,
+        "nearest_miss": {
+            "week_ret": -0.08,
+            "why": "dual week fail",
+            "book": {"strategy": "momentum_15", "timeframe": "1h", "leverage": 7},
+        },
+    }
+    miss = nearest_miss_label(h)
+    assert "momentum_15" in miss and "7×@1h" in miss
+    assert "week -8%" in miss
+    assert live_holdout_label(h) == "Live -2%"
+    assert holdout_week_note(h) == "-8%"
+
+
+def test_holdout_week_is_just_percent_on_promote():
     note = holdout_week_note(
         {"improved": True, "promote_reason": "silence_density", "week_return": 0.298}
     )

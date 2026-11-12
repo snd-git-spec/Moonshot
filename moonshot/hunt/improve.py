@@ -3467,6 +3467,17 @@ def _improve_once_impl(
             "recent_ok": best_recent_ok,
             "week_return": best_week.get("ret"),
             "targets_met": best_grade["targets_met"],
+            # Search-log truth: challenger miss vs deployed Live (HOLD reprints Live otherwise).
+            "nearest_miss": decision.get("nearest_miss") or {},
+            "baseline": decision.get("baseline") or {},
+            "challenger": {
+                "strategy": knobs.get("strategy"),
+                "timeframe": knobs.get("timeframe"),
+                "leverage": knobs.get("leverage"),
+                "week_return": best_week.get("ret"),
+                "soft_return": best_grade.get("soft_return"),
+                "score": best_grade.get("score"),
+            },
             # Deployed book (not best rejected candidate) — chart colors use these
             "strategy": live_knobs.get("strategy"),
             "timeframe": live_knobs.get("timeframe"),

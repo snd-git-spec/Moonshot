@@ -1,17 +1,13 @@
-"""Honest Recent-searches labels in plain English.
-
-Either a better setup was found and deployed, or it wasn't.
-Escape deploys are not champions — say that plainly.
-"""
+"""Honest Recent-searches labels — show what the hunt did, not Live reprints."""
 
 from __future__ import annotations
 
 from typing import Any
 
+_ESCAPE_COPY = "Escape deploy — left a worse Live book; did not pass period-robust"
 _SILENCE_REASONS = frozenset({"silence_density", "silence_rotate"})
 _LIVE_PATCH_REASONS = _SILENCE_REASONS | frozenset({"matrix_escape"})
 _PEAK_RESTORE_REASONS = frozenset({"champion_rescue"})
-_ESCAPE_COPY = "Escape deploy — left a worse Live book; did not pass period-robust"
 
 
 def gate_fail_label(why: str | None) -> str | None:
@@ -47,12 +43,132 @@ def _is_live_patch(h: dict[str, Any]) -> bool:
     return why in _LIVE_PATCH_REASONS or tier in _LIVE_PATCH_REASONS
 
 
+def _funnel(h: dict[str, Any]) -> dict[str, Any]:
+    fc = h.get("funnel_counts") or h.get("funnel") or {}
+    return fc if isinstance(fc, dict) else {}
+
+
+def _intish(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def funnel_label(h: dict[str, Any]) -> str:
+    """A→B→soft path for this pass — unfinished when soft never ran."""
+    fc = _funnel(h)
+    a = _intish(fc.get("A_keep"))
+    b = _intish(fc.get("B"))
+    soft = _intish(h.get("soft_runs"))
+    if a is None and b is None and soft is None:
+        tested = _intish(h.get("tested"))
+        return f"checked {tested}" if tested is not None else "—"
+    parts = []
+    if a is not None:
+        parts.append(f"A{a}")
+    if b is not None:
+        parts.append(f"B{b}")
+    if soft is not None:
+        parts.append(f"soft{soft}")
+    body = "→".join(parts) if parts else "—"
+    if soft is not None and soft == 0 and (a or 0) > 0:
+        return f"{body} · unfinished"
+    return body
+
+
+def coverage_label(h: dict[str, Any]) -> str:
+    """How wide the candidate pool was this pass."""
+    ns = _intish(h.get("n_unique_strat"))
+    nt = _intish(h.get("n_unique_tf"))
+    nl = _intish(h.get("n_unique_lev"))
+    tested = _intish(h.get("tested"))
+    bits = []
+    if ns is not None and nt is not None and nl is not None and (ns or nt or nl):
+        bits.append(f"{ns} strat · {nt} TF · {nl} lev")
+    elif tested is not None:
+        bits.append(f"{tested} ideas")
+    # Keep matrix cells as secondary detail when present.
+    matrix = matrix_scored_label(h)
+    if matrix and matrix != "—" and "ideas" not in matrix:
+        # Strip trailing " · N ideas" if we already show tested above.
+        bits.append(matrix.split(" · ")[0] if "cells" in matrix else matrix)
+    return " · ".join(bits) if bits else "—"
+
+
+def nearest_miss_label(h: dict[str, Any]) -> str:
+    """Best challenger that did not promote — not the Live reprint."""
+    if bool(h.get("improved")):
+        return "—"
+    miss = h.get("nearest_miss") if isinstance(h.get("nearest_miss"), dict) else {}
+    ch = h.get("challenger") if isinstance(h.get("challenger"), dict) else {}
+    knobs = h.get("knobs") if isinstance(h.get("knobs"), dict) else {}
+    book = miss.get("book") if isinstance(miss.get("book"), dict) else {}
+    if not book:
+        book = {
+            "strategy": ch.get("strategy") or knobs.get("strategy"),
+            "timeframe": ch.get("timeframe") or knobs.get("timeframe"),
+            "leverage": ch.get("leverage") or knobs.get("leverage"),
+        }
+    strat = str(book.get("strategy") or "").strip()
+    tf = str(book.get("timeframe") or "").strip()
+    try:
+        lev = int(book.get("leverage") or 0)
+    except (TypeError, ValueError):
+        lev = 0
+    book_s = ""
+    if strat and tf and lev:
+        book_s = f"{strat} {lev}×@{tf}"
+    elif strat:
+        book_s = strat
+    wr = miss.get("week_ret")
+    if wr is None:
+        wr = ch.get("week_return")
+    week_s = ""
+    if wr is not None:
+        try:
+            week_s = f"week {float(wr):+.0%}"
+        except (TypeError, ValueError):
+            week_s = ""
+    why = str(miss.get("why") or h.get("material_why") or "").strip()
+    # Keep why short — strip noisy identical-knobs when book already shown.
+    if why.lower() in ("identical knobs", "baseline"):
+        why = ""
+    soft = _intish(h.get("soft_runs"))
+    a = _intish(_funnel(h).get("A_keep"))
+    if soft is not None and soft == 0 and (a or 0) > 0 and not why:
+        why = "soft never ran"
+    bits = [x for x in (book_s, week_s, why) if x]
+    return " · ".join(bits)[:72] if bits else "—"
+
+
+def live_holdout_label(h: dict[str, Any]) -> str:
+    """Deployed Live holdout % — labeled so it is not mistaken for a challenger."""
+    wr = h.get("week_return")
+    if wr is None:
+        # Prefer explicit live baseline if present on newer rows.
+        base = h.get("baseline") if isinstance(h.get("baseline"), dict) else {}
+        wr = base.get("week_return")
+    if wr is None:
+        return "—"
+    try:
+        pct = f"{float(wr):+.0%}"
+    except (TypeError, ValueError):
+        return "—"
+    if bool(h.get("improved")):
+        return pct
+    return f"Live {pct}"
+
+
 def what_happened_label(h: dict[str, Any]) -> str:
-    """One plain line: better found, escape, or not."""
+    """One plain line: better found, escape, or what this search pass did."""
     why = _why(h)
     tier = _tier(h)
     improved = bool(h.get("improved"))
     tested = h.get("tested")
+    mode = str(h.get("search_mode") or "").strip() or "search"
 
     if improved:
         if _is_live_patch(h):
@@ -65,13 +181,33 @@ def what_happened_label(h: dict[str, Any]) -> str:
             return "Better setup found · deployed to paper"
         return "Better setup found · deployed to paper"
 
+    fc = _funnel(h)
+    soft = _intish(h.get("soft_runs"))
+    a = _intish(fc.get("A_keep"))
+    b = _intish(fc.get("B"))
+    funnel = funnel_label(h)
+    tested_s = f" · tried {tested}" if tested is not None else ""
+
+    if soft is not None and soft == 0 and (a or 0) > 0:
+        return f"{mode} · unfinished search ({funnel}){tested_s}"
+    if soft is not None and soft > 0:
+        return f"{mode} · no promote · soft-checked {soft}{tested_s}"
+    if b is not None and b == 0 and (a or 0) > 0:
+        return f"{mode} · unfinished (B empty){tested_s}"
     if tested is not None:
-        return f"No better setup found · checked {tested} ideas"
-    return "No better setup found"
+        return f"{mode} · no promote · checked {tested} ideas"
+    return f"{mode} · no promote"
 
 
 def holdout_week_note(h: dict[str, Any]) -> str:
-    """This pass's holdout week % — no jargon suffixes."""
+    """Holdout week % — prefer challenger miss when HOLD; else stored week."""
+    if not bool(h.get("improved")):
+        miss = h.get("nearest_miss")
+        if isinstance(miss, dict) and miss.get("week_ret") is not None:
+            try:
+                return f"{float(miss['week_ret']):+.0%}"
+            except (TypeError, ValueError):
+                pass
     wr = h.get("week_return")
     if wr is None:
         return "—"
