@@ -13,11 +13,14 @@ from pathlib import Path
 import streamlit as st
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
-_LOGO_JPG = _ASSETS / "moonshot_logo.jpg"
+_LOGO = next(
+    (p for p in (_ASSETS / "moonshot_logo.png", _ASSETS / "moonshot_logo.jpg") if p.exists()),
+    None,
+)
 
 st.set_page_config(
     page_title="Moonshot",
-    page_icon=str(_LOGO_JPG) if _LOGO_JPG.exists() else "◈",
+    page_icon=str(_LOGO) if _LOGO is not None else "◈",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -66,7 +69,7 @@ from dash_lib import inject_theme  # noqa: E402
 
 inject_theme()
 
-_logo = _LOGO_JPG if _LOGO_JPG.exists() else _ASSETS / "moonshot_logo.svg"
+_logo = _LOGO if _LOGO is not None else _ASSETS / "moonshot_logo.svg"
 if _logo.exists():
     st.logo(str(_logo), size="large")
 
