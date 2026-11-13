@@ -1,14 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="152" height="36" viewBox="0 0 152 36" fill="none">
-  <!-- Mark -->
-  <path d="M8 6 L14 18 L8 30 L2 18 Z" fill="#F0B90B"/>
-  <!-- One-word wordmark -->
-  <text
-    x="22"
-    y="24"
-    font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
-    font-size="20"
-    font-weight="700"
-    letter-spacing="-1.2"
-    fill="#EAECEF"
-  >Moonshot</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none">
+  <!-- Fallback mark when JPG is missing — crescent + crown silhouette -->
+  <circle cx="18" cy="18" r="17" fill="#0A0A0A"/>
+  <path
+    d="M10 28c2.2-7.5 8-12.5 15.5-14.2C22.5 8.5 17 7 12.5 10.2 7.8 13.6 6.5 20.2 10 28Z"
+    fill="#E8E8E8"
+  />
+  <path
+    d="M14 22 V12 l4 3 4-3 v10 H14Z"
+    fill="#C8C8C8"
+    stroke="#E8E8E8"
+    stroke-width="0.6"
+  />
 </svg>
