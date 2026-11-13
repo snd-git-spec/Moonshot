@@ -2038,6 +2038,42 @@ def _dual_week_ok(week: dict | None) -> bool:
     return primary >= hard_floor and prior >= hard_floor
 
 
+def _stage_c_dual_allows(
+    week: dict | None,
+    *,
+    live_week_ret: float,
+    research_min_week_edge: float | None = None,
+) -> bool:
+    """Stage C may enter _consider: absolute dual/floors OR beat Live by edge.
+
+    Absolute dual / hard_floor / +100% stay on promote via dual_or_goal.
+    Without beat-Live here, soft forever dual-rejects when Live is mildly red.
+    """
+    if _dual_week_ok(week):
+        return True
+    if not week:
+        return False
+    hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
+    week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
+    edge = (
+        float(RESEARCH_MIN_WEEK_EDGE)
+        if research_min_week_edge is None
+        else float(research_min_week_edge)
+    )
+    try:
+        primary = float(week.get("ret") or 0)
+    except (TypeError, ValueError):
+        return False
+    if primary >= week_tgt or primary >= hard_floor:
+        return True
+    prior = week.get("prior_ret")
+    try:
+        prior_ok = prior is None or float(prior) >= 0.0
+    except (TypeError, ValueError):
+        prior_ok = False
+    return bool(prior_ok and primary + 0.001 >= float(live_week_ret) + edge)
+
+
 def _period_robust_ok(
     week: dict | None,
     oos_ret: float,

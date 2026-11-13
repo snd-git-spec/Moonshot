@@ -888,10 +888,8 @@ def fetch_historical_range(
 
     cache = Path(cache_dir)
     cache.mkdir(exist_ok=True)
-    key = (
-        f"{_cache_stem(symbol, tf, source=src)}range_"
-        f"{int(fetch_start.timestamp())}_{int(fetch_end.timestamp())}_w{warm}.csv"
-    )
+    stem = f"{_cache_stem(symbol, tf, source=src)}range_"
+    key = f"{stem}{int(fetch_start.timestamp())}_{int(fetch_end.timestamp())}_w{warm}.csv"
     path = cache / key
 
     if path.exists() and not refresh:
@@ -916,6 +914,7 @@ def fetch_historical_range(
             raise _range_no_history_error(symbol, tf, t0, t1, source=src)
         with contextlib.suppress(Exception):
             df.to_csv(path)
+            prune_range_cache(cache, stem_prefix=stem)
         log.info(
             "%s yahoo 1d range %s→%s (+%d warmup) → %d bars",
             symbol,
@@ -954,6 +953,7 @@ def fetch_historical_range(
         raise _range_no_history_error(symbol, tf, t0, t1, got=None, source=src)
     with contextlib.suppress(Exception):
         df.to_csv(path)
+        prune_range_cache(cache, stem_prefix=stem)
     log.info(
         "%s %s %s range %s→%s (+%d warmup) → %d bars",
         symbol,
@@ -965,6 +965,74 @@ def fetch_historical_range(
         len(df),
     )
     return df
+
+
+def prune_range_cache(
+    cache_dir: str | Path | None = None,
+    *,
+    stem_prefix: str | None = None,
+    keep_per_stem: int = 2,
+    max_files: int = 200,
+    max_bytes: int = 2 * 1024**3,
+) -> dict[str, int]:
+    """Delete stale *range_*.csv OHLCV caches (not search memory).
+
+    - Per stem prefix: keep newest ``keep_per_stem`` by mtime.
+    - Global: if total range files > ``max_files`` or bytes > ``max_bytes``,
+      delete oldest range files until under both caps.
+    Fixed bar caches (*_{tf}_{bars}.csv) are never touched.
+    """
+    root = Path(cache_dir) if cache_dir is not None else Path(CACHE_DIR)
+    out = {"removed": 0, "freed_bytes": 0}
+    if not root.is_dir():
+        return out
+
+    def _range_files() -> list[Path]:
+        return [
+            p for p in root.iterdir() if p.is_file() and "range_" in p.name and p.suffix == ".csv"
+        ]
+
+    # Sibling prune for the stem that just wrote (or explicit prefix).
+    if stem_prefix:
+        siblings = sorted(
+            [p for p in _range_files() if p.name.startswith(stem_prefix)],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in siblings[max(0, int(keep_per_stem)) :]:
+            try:
+                sz = int(old.stat().st_size)
+                old.unlink(missing_ok=True)
+                out["removed"] += 1
+                out["freed_bytes"] += sz
+            except OSError:
+                pass
+
+    files = sorted(_range_files(), key=lambda p: p.stat().st_mtime)
+    total_bytes = 0
+    for p in files:
+        with contextlib.suppress(OSError):
+            total_bytes += int(p.stat().st_size)
+    # Drop oldest until under caps.
+    i = 0
+    while files and (len(files) - i > int(max_files) or total_bytes > int(max_bytes)):
+        victim = files[i]
+        i += 1
+        try:
+            sz = int(victim.stat().st_size)
+            victim.unlink(missing_ok=True)
+            out["removed"] += 1
+            out["freed_bytes"] += sz
+            total_bytes = max(0, total_bytes - sz)
+        except OSError:
+            continue
+    if out["removed"]:
+        log.info(
+            "range_cache_prune removed=%d freed_mb=%.1f",
+            out["removed"],
+            out["freed_bytes"] / (1024 * 1024),
+        )
+    return out
 
 
 def synthetic_ohlcv(symbol: str, n: int, tf: str = "4h") -> pd.DataFrame:

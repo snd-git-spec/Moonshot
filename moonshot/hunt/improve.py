@@ -116,6 +116,7 @@ from moonshot.hunt.scoring import (
     _best_by_tf_seed_ok,
     _dual_week_eval,
     _dual_week_ok,
+    _stage_c_dual_allows,
     _period_robust_ok,
     _escape_window_ok,
     _eval_cfg,
@@ -242,6 +243,12 @@ def _improve_once_impl(
         search_mode=search_mode,
         held_streak=held,
     )
+    # Range CSVs are OHLCV download cache only — prune so the 2G droplet
+    # cannot refill with sliding-window duplicates (not search memory).
+    with contextlib.suppress(Exception):
+        from moonshot.data import prune_range_cache
+
+        prune_range_cache()
     # Pass lifecycle — finish signal for MemoryMax / OOM-restart detection.
     # Flock update so _live_feed / watchdog cannot clobber pass_started_at.
     # force_skip_denser = one-shot denser skip only — matrix always FULL TFs.
@@ -1591,10 +1598,7 @@ def _improve_once_impl(
                     cost_ok_c,
                 )
             )
-        primary_ret = float(cweek_r.get("ret") or 0)
-        week_tgt = float(HUNT_TARGETS.get("week_return", 1.0))
-        hard_floor = float(HUNT_TARGETS.get("week_hard_floor", 0.25))
-        if not _dual_week_ok(cweek_r) and primary_ret < week_tgt and primary_ret < hard_floor:
+        if not _stage_c_dual_allows(cweek_r, live_week_ret=float(base_week.get("ret") or 0)):
             confirm_rejects["dual"] += 1
             continue
         if not _is_climb_ok(ci, co, cs, base_i, base_o):
